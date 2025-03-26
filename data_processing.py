@@ -238,6 +238,9 @@ class DataProcessor:
             
             # Add tags to corpus if available
             if self.tags_df is not None:
+                # Fill NaN values with empty strings before aggregation
+                self.tags_df['tag'] = self.tags_df['tag'].fillna('').astype(str)
+                
                 # Aggregate tags by movieId
                 tags_by_movie = self.tags_df.groupby('movieId')['tag'].apply(lambda x: ' '.join(x)).reset_index()
                 tags_by_movie['tag'] = tags_by_movie['tag'].apply(self._clean_text)
@@ -308,23 +311,53 @@ class DataProcessor:
         
         # 3. Calculate user preferences for genres
         if self.ratings_df is not None and self.movies_df is not None:
-            # Merge ratings with movie genre data
-            genre_columns = [col for col in self.movies_df.columns if col not in 
-                            ['movieId', 'title', 'genres', 'text_corpus', 'tokens', 'year', 'genres_list']]
+    # Merge ratings with movie genre data
+            common_genres = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 
+                            'Documentary', 'Drama', 'Family', 'Fantasy', 'History',
+                            'Horror', 'Music', 'Mystery', 'Romance', 'Science Fiction', 
+                            'Sci-Fi', 'TV Movie', 'Thriller', 'War', 'Western']
+
+            # Then filter columns that are either in common_genres or have 'genre' in the name 
+            genre_columns = [col for col in self.movies_df.columns 
+                            if col in common_genres or 
+                            'genre' in col.lower() or 
+                            any(genre.lower() in col.lower() for genre in common_genres)]
+
+            # Explicitly exclude non-genre columns that might get caught in the filter
+            non_genre_columns = ['movieId', 'title', 'genres', 'text_corpus', 'tokens', 'year', 
+                                'genres_list', 'tmdb_title', 'overview', 'cast', 'director', 
+                                'tag', 'tmdbId', 'id']
+            genre_columns = [col for col in genre_columns if col not in non_genre_columns]
+
+            logger.info(f"Identified {len(genre_columns)} genre columns: {genre_columns}")
             
             # Keep only genre columns (assuming they are one-hot encoded)
             genre_columns = [col for col in genre_columns if col in self.movies_df.columns]
             
             if genre_columns:
-                # Convert genre columns to numeric before merging
-                for genre in genre_columns:
-                    if not pd.api.types.is_numeric_dtype(self.movies_df[genre]):
-                        logger.info(f"Converting genre column {genre} to numeric")
-                        self.movies_df[genre] = pd.to_numeric(self.movies_df[genre], errors='coerce').fillna(0).astype(int)
+                # Create a new DataFrame with only the columns we need
+                movies_genres_df = self.movies_df[['movieId'] + genre_columns].copy()
                 
+                # Handle non-numeric columns and convert to safe numeric values
+                for genre in genre_columns:
+                    try:
+                        # Convert to numeric if not already
+                        if not pd.api.types.is_numeric_dtype(movies_genres_df[genre]):
+                            movies_genres_df[genre] = pd.to_numeric(movies_genres_df[genre], errors='coerce')
+                        
+                        # Replace all non-finite values with 0 and convert to int
+                        movies_genres_df[genre] = movies_genres_df[genre].replace([np.inf, -np.inf], np.nan).fillna(0)
+                        movies_genres_df[genre] = movies_genres_df[genre].astype('Int64')  # Use Int64 pandas nullable integer type
+                    except Exception as e:
+                        logger.warning(f"Error processing genre column {genre}: {str(e)}")
+                        # Remove problematic column
+                        movies_genres_df.drop(columns=[genre], inplace=True)
+                        genre_columns.remove(genre)
+                
+                # Merge with ratings
                 ratings_with_genres = pd.merge(
-                    self.ratings_df, 
-                    self.movies_df[['movieId'] + genre_columns],
+                    self.ratings_df,
+                    movies_genres_df,
                     on='movieId'
                 )
                 
@@ -365,6 +398,11 @@ class DataProcessor:
                             user_prefs[f'{genre}_pref'] = 0
                     
                     user_genre_prefs.append(user_prefs)
+                
+                # Create DataFrame from user preferences
+                self.user_genre_preferences = pd.DataFrame(user_genre_prefs)
+                
+                logger.info(f"Calculated genre preferences for {len(self.user_genre_preferences)} users")
     def split_and_save_ratings(self):
         """Split ratings into train and test sets and save them"""
         if self.ratings_df is not None and len(self.ratings_df) > 0:
@@ -607,13 +645,14 @@ class DataProcessor:
                 # Save user genre preferences
                 self.user_genre_preferences.to_csv(os.path.join(self.output_path, 'user_genre_prefs.csv'), index=False)
                 
-                # Save movie statistics
-                if hasattr(self, 'movie_stats'):
-                    self.movie_stats.to_csv(os.path.join(self.output_path, 'movie_stats.csv'), index=False)
-                
-                # Save user statistics
-                if hasattr(self, 'user_stats'):
+                # Save user and movie stats directly
+                if hasattr(self, 'user_stats') and self.user_stats is not None:
                     self.user_stats.to_csv(os.path.join(self.output_path, 'user_stats.csv'), index=False)
+                    logger.info(f"Saved statistics for {len(self.user_stats)} users to user_stats.csv")
+                    
+                if hasattr(self, 'movie_stats') and self.movie_stats is not None:
+                    self.movie_stats.to_csv(os.path.join(self.output_path, 'movie_stats.csv'), index=False)
+                    logger.info(f"Saved statistics for {len(self.movie_stats)} movies to movie_stats.csv")
                 
                 # Save train and test sets
                 if hasattr(self, 'train_df') and hasattr(self, 'test_df'):

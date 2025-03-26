@@ -521,7 +521,7 @@ class DNNRecommender:
             # Filter to only include movies in our features
             movie_ids = [mid for mid in movie_ids if mid in self.movie_features['movieId'].values]
         
-        if not movie_ids:
+        if np.size(movie_ids) == 0:
             logger.warning("No valid movie IDs to predict for")
             return None
         
@@ -544,7 +544,7 @@ class DNNRecommender:
                 movie_features_list.append(movie_row.drop('movieId').values)
                 valid_movie_ids.append(mid)
         
-        if not valid_movie_ids:
+        if np.size(valid_movie_ids) == 0:
             logger.warning("No valid movies to predict for after filtering")
             return None
         
