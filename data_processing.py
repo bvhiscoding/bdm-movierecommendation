@@ -439,7 +439,6 @@ class DataProcessor:
         if os.path.exists(tokenized_corpus_path):
             with open(tokenized_corpus_path, 'rb') as f:
                 tokenized_corpus = pickle.load(f)
-            
             # Train Word2Vec model
             self.word2vec_model = Word2Vec(
                 sentences=tokenized_corpus,
@@ -627,7 +626,6 @@ class DataProcessor:
                 pickle.dump(user_id_to_idx, f)
         
         # 5. Process data for the DNN model
-        # 5. Process data for the DNN model
         if hasattr(self, 'user_genre_preferences') and self.user_genre_preferences is not None:
             logger.info("Preparing data for DNN model...")
             
@@ -706,7 +704,6 @@ class DataProcessor:
                 'num_movie_vectors': len(self.movie_features) if hasattr(self, 'movie_features') else 0
             }
         }
-
 if __name__ == "__main__":
     # Create processor with default paths
     processor = DataProcessor(data_path="./data/20m", output_path="./processed_data")
