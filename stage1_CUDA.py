@@ -685,5 +685,4 @@ if CUDA_AVAILABLE:
     print(f"- Reserved: {reserved_memory:.2f} GB")
     print(f"- Total Available: {total_memory:.2f} GB")
     print(f"- Utilization: {(allocated_memory/total_memory)*100:.2f}%")
-
 print("="*80)
