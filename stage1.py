@@ -190,7 +190,7 @@ plt.title('Distribution of Token Count per Movie')
 plt.xlabel('Number of Tokens')
 plt.ylabel('Number of Movies')
 plt.grid(True, alpha=0.3)
-plt.savefig('token_distribution.png')
+plt.savefig('./processed/istribution.png')
 print("\nToken distribution plot saved as 'token_distribution.png'")
 plt.close()
 
@@ -241,44 +241,44 @@ plt.ylabel('Number of Users')
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('user_rating_stats.png')
+plt.savefig('./processed/user_rating_stats.png')
 print("\nUser rating statistics plot saved as 'user_rating_stats.png'")
 plt.close()
 
 # Normalize ratings using z-score and min-max scaling
-def normalize_ratings(ratings, user_stats):
-    normalized_ratings = ratings.copy()
+def normalize_ratings(ratings_df):
+    """Chuẩn hóa đánh giá sử dụng Min-Max scaling theo từng người dùng"""
+    # Tạo bản sao để không ảnh hưởng đến dữ liệu gốc
+    result_df = ratings_df.copy()
     
-    for index, row in normalized_ratings.iterrows():
-        user_id = row['userId']
-        user_data = user_stats[user_stats['userId'] == user_id]
-        
-        if user_data.empty:
-            # Skip if user not found in stats
-            normalized_ratings.at[index, 'normalized_rating'] = 0.5  # Default mid-value
-            continue
-            
-        user_data = user_data.iloc[0]
-        mean_rating = user_data['rating_mean']
-        std_rating = user_data['rating_std']
-        
-        if std_rating > 0:
-            # Z-score normalization
-            normalized_rating = (row['rating'] - mean_rating) / std_rating
-            # Scale to [0, 1]
-            normalized_rating = (normalized_rating + 3) / 6  # Assuming range is [-3, 3] after z-score
-            normalized_rating = min(max(normalized_rating, 0), 1)  # Clip to [0, 1]
-        else:
-            # If std is 0, just use min-max scaling from [0.5, 5] to [0, 1]
-            normalized_rating = (row['rating'] - 0.5) / 4.5
-        
-        normalized_ratings.at[index, 'normalized_rating'] = normalized_rating
+    # Tính toán giá trị min và max của từng người dùng
+    user_stats = ratings_df.groupby('userId').agg({
+        'rating': ['min', 'max']
+    }).reset_index()
     
-    return normalized_ratings
-
+    # Flatten column names
+    user_stats.columns = ['userId', 'rating_min', 'rating_max']
+    
+    # Gộp thống kê người dùng với đánh giá
+    merged_df = pd.merge(result_df, user_stats, on='userId', how='left')
+    
+    # Tính toán normalized rating
+    # Xử lý trường hợp min = max (tất cả đánh giá bằng nhau)
+    mask_diff = (merged_df['rating_max'] - merged_df['rating_min']) > 0
+    
+    # Với người dùng có sự khác biệt trong đánh giá
+    merged_df.loc[mask_diff, 'normalized_rating'] = (
+        (merged_df.loc[mask_diff, 'rating'] - merged_df.loc[mask_diff, 'rating_min']) / 
+        (merged_df.loc[mask_diff, 'rating_max'] - merged_df.loc[mask_diff, 'rating_min'])
+    )
+    
+    # Với người dùng không có sự khác biệt, gán giá trị mặc định 0.5
+    merged_df.loc[~mask_diff, 'normalized_rating'] = 0.5
+    
+    return merged_df[['userId', 'movieId', 'rating', 'normalized_rating']]
 # Apply normalization
 print("\nNormalizing ratings...")
-normalized_ratings = normalize_ratings(ratings_df, user_stats)
+normalized_ratings = normalize_ratings(ratings_df)
 
 print("\nOriginal vs. Normalized ratings:")
 print(normalized_ratings[['userId', 'movieId', 'rating', 'normalized_rating']].head(10))
@@ -300,7 +300,7 @@ plt.ylabel('Count')
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('rating_normalization.png')
+plt.savefig('./processed/rating_normalization.png')
 print("\nRating normalization plot saved as 'rating_normalization.png'")
 plt.close()
 
@@ -386,7 +386,7 @@ plt.ylabel('Number of Movies')
 plt.xticks(rotation=45, ha='right')
 plt.grid(True, axis='y', alpha=0.3)
 plt.tight_layout()
-plt.savefig('genre_distribution.png')
+plt.savefig('./processed/genre_distribution.png')
 print("\nGenre distribution plot saved as 'genre_distribution.png'")
 plt.close()
 
@@ -427,8 +427,8 @@ print("\nFinal movie features (sample):")
 print(display_features.head())
 
 # Save the processed data for later use
-movie_features.to_csv('processed_movie_features.csv', index=False)
-normalized_ratings.to_csv('normalized_ratings.csv', index=False)
+movie_features.to_csv('./processed/processed_movie_features.csv', index=False)
+normalized_ratings.to_csv('./processed/normalized_ratings.csv', index=False)
 
 print("\nProcessed data saved to 'processed_movie_features.csv' and 'normalized_ratings.csv'")
 
