@@ -314,15 +314,6 @@ def build_and_train_dnn_model(X_train, X_val, y_train, y_val):
 def evaluate_model_on_test_set(dnn_model, user_genre_preferences, movie_genre_features, test_ratings):
     """
     Directly evaluate the DNN model on the test set ratings
-    
-    Input:
-      - dnn_model: Trained DNN model
-      - user_genre_preferences: DataFrame with user genre preferences
-      - movie_genre_features: DataFrame with movie genre features
-      - test_ratings: DataFrame with test ratings
-    
-    Output:
-      - metrics: Dictionary with evaluation metrics (rmse, mae)
     """
     logger.info("Directly evaluating DNN model on test set...")
     
@@ -372,22 +363,9 @@ def evaluate_model_on_test_set(dnn_model, user_genre_preferences, movie_genre_fe
         predictions.append(predicted_rating)
         actuals.append(actual_rating)
     
-    # Check if we have predictions to evaluate
-    if not predictions:
-        logger.warning("No predictions to evaluate")
-        return {
-            'rmse': float('inf'),
-            'mae': float('inf'),
-            'num_predictions': 0
-        }
-    
-    # Convert to numpy arrays
-    predictions = np.array(predictions)
-    actuals = np.array(actuals)
-    
     # Calculate RMSE and MAE
-    rmse = np.sqrt(np.mean((predictions - actuals) ** 2))
-    mae = np.mean(np.abs(predictions - actuals))
+    rmse = np.sqrt(np.mean((np.array(predictions) - np.array(actuals)) ** 2))
+    mae = np.mean(np.abs(np.array(predictions) - np.array(actuals)))
     
     metrics = {
         'rmse': rmse,
@@ -396,7 +374,51 @@ def evaluate_model_on_test_set(dnn_model, user_genre_preferences, movie_genre_fe
     }
     
     logger.info(f"Direct evaluation completed - RMSE: {rmse:.4f}, MAE: {mae:.4f}, Predictions: {len(predictions)}")
-    
+    # At the end of the script, in the performance metrics section:
+
+    # Display performance metrics
+    print("\nPerformance Metrics Comparison:")
+    headers = ["Model", "RMSE", "MAE", "Predictions Evaluated"]
+    rows = []
+
+    # Content-based model metrics (if available)
+    if 'content_based_evaluation' in data:
+        rows.append([
+            "Content-Based (Log-Likelihood + Word2Vec)",
+            f"{data['content_based_evaluation']['rmse']:.4f}",
+            f"{data['content_based_evaluation']['mae']:.4f}",
+            str(data['content_based_evaluation']['num_predictions'])
+        ])
+
+    # DNN model metrics
+    # This is where the issue might be - check if dnn_direct_metrics exists
+    if 'dnn_direct_metrics' in data:
+        print(f"Debug - DNN metrics found: {data['dnn_direct_metrics']}")  # Add debug output
+        rows.append([
+            "Memory-Based (DNN)",
+            f"{data['dnn_direct_metrics']['rmse']:.4f}",
+            f"{data['dnn_direct_metrics']['mae']:.4f}",
+            str(data['dnn_direct_metrics']['num_predictions'])
+        ])
+    else:
+        print("Debug - DNN metrics not found in data dictionary")  # Add debug output
+        # Check if metrics were calculated but stored differently
+        if 'dnn_evaluation_metrics' in data:
+            rows.append([
+                "Memory-Based (DNN)",
+                f"{data['dnn_evaluation_metrics']['rmse']:.4f}",
+                f"{data['dnn_evaluation_metrics']['mae']:.4f}",
+                str(data['dnn_evaluation_metrics']['num_predictions'])
+            ])
+
+    # Combined model metrics
+    if 'combined_evaluation_metrics' in data:
+        rows.append([
+            f"Hybrid (α={best_alpha})",
+            f"{data['combined_evaluation_metrics']['rmse']:.4f}",
+            f"{data['combined_evaluation_metrics']['mae']:.4f}",
+            str(data['combined_evaluation_metrics']['num_predictions'])
+        ])
     return metrics
 
 def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10):
@@ -523,6 +545,7 @@ def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
     actuals = []
     
     # For each user in the test set
+    # For each user in the test set
     for user_id in test_ratings['userId'].unique():
         # Skip users without recommendations
         if user_id not in recommendations:
@@ -543,7 +566,6 @@ def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
             if movie_id in user_recs:
                 predictions.append(user_recs[movie_id])
                 actuals.append(actual_rating)
-    
     # Check if we have predictions to evaluate
     if not predictions:
         logger.warning("No predictions to evaluate")
@@ -733,25 +755,21 @@ if __name__ == "__main__":
 
     # Step 6: Evaluate DNN Model on Test Set
     if all(key in data for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'test_ratings']):
+        print("Evaluating DNN model on test set...")  # Add debug output
         dnn_direct_metrics = evaluate_model_on_test_set(
             data['dnn_model'],
             data['user_genre_preferences'],
             data['movie_genre_features'],
             data['test_ratings']
         )
+        # Make sure to store the metrics in the data dictionary
         data['dnn_direct_metrics'] = dnn_direct_metrics
-        # Output: dnn_direct_metrics (dictionary with rmse, mae)
-        
-        # Save direct evaluation metrics
-        direct_evaluation_df = pd.DataFrame([dnn_direct_metrics])
-        direct_evaluation_df.to_csv(os.path.join(output_path, 'dnn_direct_evaluation.csv'), index=False)
-        
-        # Display direct evaluation metrics
-        print("\nDNN Direct Evaluation Results:")
-        print(f"RMSE: {dnn_direct_metrics['rmse']:.4f}")
-        print(f"MAE: {dnn_direct_metrics['mae']:.4f}")
-        print(f"Number of predictions evaluated: {dnn_direct_metrics['num_predictions']}")
-
+        print(f"DNN evaluation complete. RMSE: {dnn_direct_metrics['rmse']:.4f}, MAE: {dnn_direct_metrics['mae']:.4f}")  # Add debug output
+    else:
+        print("Cannot evaluate DNN model - missing required data")  # Add debug output
+        # Print what's missing
+        for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'test_ratings']:
+            print(f"  - {key}: {'Present' if key in data else 'Missing'}")
     # Step 7: Generate DNN Recommendations for All Users
     if all(key in data for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'train_ratings']):
         dnn_recommendations = generate_recommendations_for_all_users_dnn(

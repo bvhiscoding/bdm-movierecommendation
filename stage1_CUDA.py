@@ -77,16 +77,16 @@ def load_data_with_timing(file_path, message):
     return data
 
 # Load MovieLens movie data
-movies_df = load_data_with_timing('data/20M/demo_movie.csv', "Loaded movies")
+movies_df = load_data_with_timing('extracted_data/extracted_movies.csv', "Loaded movies")
 
 # Load TMDB data
-tmdb_df = load_data_with_timing('data/20M/demo_tmdb.csv', "Loaded TMDB data")
+tmdb_df = load_data_with_timing('extracted_data/extracted_tmdbs.csv', "Loaded TMDB data")
 
 # Load links data
-links_df = load_data_with_timing('data/20M/demo_link.csv', "Loaded movie links")
+links_df = load_data_with_timing('extracted_data/extracted_links.csv', "Loaded movie links")
 
 # Load tags data
-tags_df = load_data_with_timing('data/20M/demo_tag.csv', "Loaded movie tags")
+tags_df = load_data_with_timing('extracted_data/extracted_tags.csv', "Loaded movie tags")
 
 # Transfer to GPU memory for faster merging operations if CUDA is available
 if CUDA_AVAILABLE:

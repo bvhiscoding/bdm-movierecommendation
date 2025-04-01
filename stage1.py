@@ -25,22 +25,22 @@ print("\n" + "="*80)
 print("STEP 1: MOVIE TEXT FEATURE EXTRACTION")
 print("="*80)
 # Load MovieLens movie data
-movies_df = pd.read_csv('data/20M/movie.csv')
+movies_df = pd.read_csv('extracted_data/extracted_movies.csv')
 print(f"Loaded {len(movies_df)} movies from MovieLens dataset")
 print(movies_df.head(3))
 
 # Load TMDB data (containing movie overviews, cast, director)
-tmdb_df = pd.read_csv('data/20M/tmdb.csv')
+tmdb_df = pd.read_csv('extracted_data/tmdb.csv')
 print(f"\nLoaded {len(tmdb_df)} movies from TMDB dataset")
 print(tmdb_df.head(3)[['id', 'tmdb_title', 'overview']])
 
 # Load links data to connect MovieLens IDs with TMDB IDs
-links_df = pd.read_csv('data/20M/link.csv')
+links_df = pd.read_csv('extracted_data/extracted_links.csv')
 print(f"\nLoaded {len(links_df)} movie links")
 print(links_df.head(3))
 
 # Load tags data for additional text information
-tags_df = pd.read_csv('data/20M/tag.csv')
+tags_df = pd.read_csv('extracted_data/extracted_tags.csv')
 print(f"\nLoaded {len(tags_df)} movie tags")
 print(tags_df.head(3))
 # Merge movie data with TMDB data via links_df
@@ -200,7 +200,7 @@ print("STEP 3: DATA NORMALIZATION")
 print("="*80)
 
 # Load user ratings data
-ratings_df = pd.read_csv('data/20M/rating.csv')
+ratings_df = pd.read_csv('extracted_data/extracted_ratings.csv')
 print(f"Loaded {len(ratings_df)} ratings from {len(ratings_df['userId'].unique())} users")
 print(ratings_df.head())
 
