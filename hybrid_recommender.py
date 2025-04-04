@@ -54,7 +54,7 @@ class HybridRecommender:
             
         print("\n" + "="*80)
         print(f"HYBRID MOVIE RECOMMENDATION SYSTEM (alpha={self.alpha:.2f})")
-        print("="*80)
+        print("="*80)  
     
     def load_data(self):
         """Load movie data, content-based and collaborative filtering model outputs"""

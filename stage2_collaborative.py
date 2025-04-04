@@ -18,7 +18,7 @@ logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 # Set paths
-input_path = "./"  # Current directory where stage1.py saved the files
+input_path = "./processed"  # Current directory where stage1.py saved the files
 output_path = "./recommendations"
 top_n = 10
 
@@ -946,7 +946,7 @@ if __name__ == "__main__":
             print(f"\nGenerating sample combined recommendations for User ID {sample_user_id}:")
             
             # Get user ratings for context
-            if 'train_ratings' in data:
+            if 'train_ratings' in data: 
                 user_ratings = data['train_ratings'][data['train_ratings']['userId'] == sample_user_id]
                 
                 print(f"\nThis user has rated {len(user_ratings)} movies.")
