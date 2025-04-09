@@ -1,5 +1,5 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import os
 import pickle
 import logging
@@ -12,14 +12,15 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter, defaultdict
+import time
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Set paths
-input_path = "./processed"  # Current directory where stage1.py saved the files
-output_path = "./recommendations"
+input_path = "./"  # Current directory where stage1.py saved the files
+output_path = "./collaborative-recommendations"
 top_n = 10
 
 # Create output directory if it doesn't exist
@@ -27,11 +28,11 @@ if not os.path.exists(output_path):
     os.makedirs(output_path)
 
 # Model parameters
-dnn_hidden_layers = [32, 18, 9]  # Based on the paper's DNN architecture 
+dnn_hidden_layers = [64, 32, 16]  # Optimized architecture 
 dnn_dropout_rate = 0.2
 dnn_learning_rate = 0.001
-dnn_batch_size = 32
-dnn_epochs = 50
+dnn_batch_size = 64   # Increased batch size for faster training
+dnn_epochs = 20       # Reduced epochs with early stopping
 threshold_rating = 3.0  # Rating threshold to classify as "like"
 
 def load_data():
@@ -47,20 +48,22 @@ def load_data():
     data = {}
     
     # Load movie features
-    movie_features_path = os.path.join(input_path, 'processed_movie_features.csv')
+    movie_features_path = os.path.join(input_path, 'processed/processed_movie_features.csv')
     if os.path.exists(movie_features_path):
         data['movie_features'] = pd.read_csv(movie_features_path)
         logger.info(f"Loaded features for {len(data['movie_features'])} movies")
     else:
         logger.error(f"Movie features not found at {movie_features_path}")
+        return None
     
     # Load normalized ratings
-    ratings_path = os.path.join(input_path, 'normalized_ratings.csv')
+    ratings_path = os.path.join(input_path, 'processed/normalized_ratings.csv')
     if os.path.exists(ratings_path):
         data['ratings'] = pd.read_csv(ratings_path)
         logger.info(f"Loaded {len(data['ratings'])} normalized ratings")
     else:
         logger.error(f"Normalized ratings not found at {ratings_path}")
+        return None
     
     # Create training and testing sets with 80-20 split
     if 'ratings' in data:
@@ -83,13 +86,6 @@ def load_data():
         data['test_ratings'] = pd.concat(test_data).reset_index(drop=True)
         
         logger.info(f"Split ratings into {len(data['train_ratings'])} training and {len(data['test_ratings'])} testing samples")
-    
-    # Try to load content-based recommendations if they exist
-    content_recs_path = os.path.join(output_path, 'content_based_recommendations.pkl')
-    if os.path.exists(content_recs_path):
-        with open(content_recs_path, 'rb') as f:
-            data['content_based_recommendations'] = pickle.load(f)
-        logger.info(f"Loaded content-based recommendations for {len(data['content_based_recommendations'])} users")
     
     return data
 
@@ -157,13 +153,13 @@ def calculate_user_genre_preferences(train_ratings, movie_genre_features):
         
         for genre in genre_columns:
             # Get genre values for liked movies
-            liked_genre = movie_genre_features[movie_genre_features['movieId'].isin(liked_movies)][genre].sum()
+            genre_liked = movie_genre_features[movie_genre_features['movieId'].isin(liked_movies)][genre].sum()
             
             # Get genre values for disliked movies
-            disliked_genre = movie_genre_features[movie_genre_features['movieId'].isin(disliked_movies)][genre].sum()
+            genre_disliked = movie_genre_features[movie_genre_features['movieId'].isin(disliked_movies)][genre].sum()
             
             # Calculate preference
-            genre_preferences[genre] = liked_genre - disliked_genre
+            genre_preferences[genre] = genre_liked - genre_disliked
         
         # Calculate maximum absolute genre preference
         max_abs_preference = max(abs(val) for val in genre_preferences.values()) if genre_preferences else 1
@@ -207,8 +203,12 @@ def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre
     features = []
     labels = []
     
+    # Process only a sample of ratings for efficiency
+    sample_size = min(1000000, len(train_ratings))  # Cap at 1M ratings
+    sampled_ratings = train_ratings.sample(sample_size, random_state=42) if len(train_ratings) > sample_size else train_ratings
+    
     # Process each rating
-    for _, row in train_ratings.iterrows():
+    for _, row in sampled_ratings.iterrows():
         user_id = row['userId']
         movie_id = row['movieId']
         rating = row['rating']
@@ -228,7 +228,9 @@ def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre
         feature_vector = []
         
         for genre in genre_columns:
+            # Add user preference for this genre
             feature_vector.append(user_prefs[genre])
+            # Add movie genre indicator
             feature_vector.append(movie_genres[genre])
         
         # Use the actual rating as the target
@@ -236,8 +238,10 @@ def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre
         labels.append(rating)
     
     # Convert to numpy arrays
-    X = np.array(features)
-    y = np.array(labels)
+    X = np.array(features, dtype=np.float32)
+    y = np.array(labels, dtype=np.float32)
+    
+    logger.info(f"Created feature matrix with shape {X.shape} and labels with shape {y.shape}")
     
     # Split into training and validation sets
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -260,10 +264,20 @@ def build_and_train_dnn_model(X_train, X_val, y_train, y_val):
     """
     logger.info("Building and training DNN model...")
     
+    # Set memory limit to avoid OOM errors
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info(f"Found {len(gpus)} GPU(s), enabled memory growth")
+        except RuntimeError as e:
+            logger.warning(f"Error setting GPU memory growth: {e}")
+    
     # Define input dimension
     input_dim = X_train.shape[1]
     
-    # Build model based on paper's architecture
+    # Build model based on optimized architecture
     model = Sequential()
     
     # Input layer
@@ -311,131 +325,49 @@ def build_and_train_dnn_model(X_train, X_val, y_train, y_val):
     
     return model, history
 
-def evaluate_model_on_test_set(dnn_model, user_genre_preferences, movie_genre_features, test_ratings):
+def generate_user_movie_features(user_id, movie_id, user_genre_preferences, movie_genre_features):
     """
-    Directly evaluate the DNN model on the test set ratings
-    """
-    logger.info("Directly evaluating DNN model on test set...")
+    Generate feature vector for a specific user-movie pair
     
+    Input:
+      - user_id: User ID
+      - movie_id: Movie ID
+      - user_genre_preferences: DataFrame with user genre preferences
+      - movie_genre_features: DataFrame with movie genre features
+    
+    Output:
+      - feature_vector: Feature vector for the user-movie pair
+    """
     # Get genre columns
     genre_columns = [col for col in movie_genre_features.columns if col != 'movieId']
     
-    # Initialize lists for predictions and actual ratings
-    predictions = []
-    actuals = []
+    # Skip if user or movie not found
+    if user_id not in user_genre_preferences['userId'].values or \
+       movie_id not in movie_genre_features['movieId'].values:
+        return None
     
-    # For each rating in the test set
-    for _, row in test_ratings.iterrows():
-        user_id = row['userId']
-        movie_id = row['movieId']
-        actual_rating = row['rating']
-        
-        # Skip if user or movie not found
-        if user_id not in user_genre_preferences['userId'].values or \
-           movie_id not in movie_genre_features['movieId'].values:
-            continue
-        
-        # Get user genre preferences
-        user_prefs = user_genre_preferences[user_genre_preferences['userId'] == user_id].iloc[0]
-        
-        # Get movie genres
-        movie_row = movie_genre_features[movie_genre_features['movieId'] == movie_id]
-        if movie_row.empty:
-            continue
-        movie_genres = movie_row.iloc[0]
-        
-        # Create feature vector
-        feature_vector = []
-        
-        for genre in genre_columns:
-            feature_vector.append(user_prefs[genre])
-            feature_vector.append(movie_genres[genre])
-        
-        # Reshape for prediction
-        feature_vector = np.array([feature_vector])
-        
-        # Predict movie rating
-        predicted_rating = dnn_model.predict(feature_vector, verbose=0)[0][0]
-        
-        # Ensure rating is within bounds
-        predicted_rating = max(0.5, min(5.0, predicted_rating))
-        
-        predictions.append(predicted_rating)
-        actuals.append(actual_rating)
+    # Get user genre preferences
+    user_prefs = user_genre_preferences[user_genre_preferences['userId'] == user_id].iloc[0]
     
-    # Calculate RMSE and MAE
-    rmse = np.sqrt(np.mean((np.array(predictions) - np.array(actuals)) ** 2))
-    mae = np.mean(np.abs(np.array(predictions) - np.array(actuals)))
+    # Get movie genres
+    movie_row = movie_genre_features[movie_genre_features['movieId'] == movie_id]
+    if movie_row.empty:
+        return None
+    movie_genres = movie_row.iloc[0]
     
-    metrics = {
-        'rmse': rmse,
-        'mae': mae,
-        'num_predictions': len(predictions)
-    }
+    # Create feature vector
+    feature_vector = []
     
-    logger.info(f"Direct evaluation completed - RMSE: {rmse:.4f}, MAE: {mae:.4f}, Predictions: {len(predictions)}")
-    # At the end of the script, in the performance metrics section:
-
-    # Display performance metrics
-    print("\nPerformance Metrics Comparison:")
-    headers = ["Model", "RMSE", "MAE", "Predictions Evaluated"]
-    rows = []
-
-    # Content-based model metrics (if available)
-    if 'content_based_evaluation' in data:
-        rows.append([
-            "Content-Based (Log-Likelihood + Word2Vec)",
-            f"{data['content_based_evaluation']['rmse']:.4f}",
-            f"{data['content_based_evaluation']['mae']:.4f}",
-            str(data['content_based_evaluation']['num_predictions'])
-        ])
-
-    # DNN model metrics
-    # This is where the issue might be - check if dnn_direct_metrics exists
-    if 'dnn_direct_metrics' in data:
-        print(f"Debug - DNN metrics found: {data['dnn_direct_metrics']}")  # Add debug output
-        rows.append([
-            "Memory-Based (DNN)",
-            f"{data['dnn_direct_metrics']['rmse']:.4f}",
-            f"{data['dnn_direct_metrics']['mae']:.4f}",
-            str(data['dnn_direct_metrics']['num_predictions'])
-        ])
-    else:
-        print("Debug - DNN metrics not found in data dictionary")  # Add debug output
-        # Check if metrics were calculated but stored differently
-        if 'dnn_evaluation_metrics' in data:
-            rows.append([
-                "Memory-Based (DNN)",
-                f"{data['dnn_evaluation_metrics']['rmse']:.4f}",
-                f"{data['dnn_evaluation_metrics']['mae']:.4f}",
-                str(data['dnn_evaluation_metrics']['num_predictions'])
-            ])
-
-    # Combined model metrics
-    if 'combined_evaluation_metrics' in data:
-        rows.append([
-            f"Hybrid (α={best_alpha})",
-            f"{data['combined_evaluation_metrics']['rmse']:.4f}",
-            f"{data['combined_evaluation_metrics']['mae']:.4f}",
-            str(data['combined_evaluation_metrics']['num_predictions'])
-        ])
-    return metrics
+    for genre in genre_columns:
+        # Add user preference for this genre
+        feature_vector.append(user_prefs[genre])
+        # Add movie genre indicator
+        feature_vector.append(movie_genres[genre])
+    
+    return np.array([feature_vector], dtype=np.float32)
 
 def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10):
-    """
-    Generate recommendations for a user using the DNN model
-    
-    Input:
-      - user_id: User ID to generate recommendations for
-      - dnn_model: Trained DNN model
-      - user_genre_preferences: DataFrame with user genre preferences
-      - movie_genre_features: DataFrame with movie genre features
-      - train_ratings: DataFrame with training ratings
-      - n: Number of recommendations to generate
-    
-    Output:
-      - movie_predictions: List of (movie_id, predicted_rating) tuples
-    """
+    """Optimized version with batched predictions"""
     # Skip if user not found in genre preferences
     if user_id not in user_genre_preferences['userId'].values:
         logger.warning(f"User {user_id} not found in genre preferences")
@@ -450,44 +382,53 @@ def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, mov
     # Get movies already rated by the user
     rated_movies = set(train_ratings[train_ratings['userId'] == user_id]['movieId'].values)
     
-    # Initialize movie predictions
-    movie_predictions = []
+    # Get unrated movies
+    unrated_movies = movie_genre_features[~movie_genre_features['movieId'].isin(rated_movies)]
     
-    # Process each movie
-    for _, movie_row in movie_genre_features.iterrows():
-        movie_id = movie_row['movieId']
-        
-        # Skip if movie already rated
-        if movie_id in rated_movies:
-            continue
-        
-        # Create feature vector
-        feature_vector = []
-        
-        for genre in genre_columns:
-            feature_vector.append(user_prefs[genre])
-            feature_vector.append(movie_row[genre])
-        
-        # Reshape for prediction
-        feature_vector = np.array([feature_vector])
-        
-        # Predict movie rating
-        predicted_rating = dnn_model.predict(feature_vector, verbose=0)[0][0]
-        
-        # Ensure rating is within bounds
-        predicted_rating = max(0.5, min(5.0, predicted_rating))
-        
-        movie_predictions.append((movie_id, predicted_rating))
+    # Process in batches to avoid memory issues
+    batch_size = 1000
+    all_predictions = []
     
+    for i in range(0, len(unrated_movies), batch_size):
+        batch = unrated_movies.iloc[i:i+batch_size]
+        
+        # Create feature vectors in a vectorized way
+        feature_vectors = []
+        movie_ids = []
+        
+        for _, movie_row in batch.iterrows():
+            movie_id = movie_row['movieId']
+            feature_vector = []
+            
+            for genre in genre_columns:
+                feature_vector.append(user_prefs[genre])
+                feature_vector.append(movie_row[genre])
+            
+            feature_vectors.append(feature_vector)
+            movie_ids.append(movie_id)
+        
+        # Convert to numpy array for batch prediction
+        feature_array = np.array(feature_vectors)
+        
+        # Predict in batch
+        predictions = dnn_model.predict(feature_array, verbose=0).flatten()
+        
+        # Ensure ratings are within bounds
+        predictions = np.clip(predictions, 0.5, 5.0)
+        
+        # Add to results
+        for movie_id, pred in zip(movie_ids, predictions):
+            all_predictions.append((movie_id, pred))
+            
     # Sort by predicted rating in descending order
-    movie_predictions.sort(key=lambda x: x[1], reverse=True)
+    all_predictions.sort(key=lambda x: x[1], reverse=True)
     
     # Return top N recommendations
-    return movie_predictions[:n]
+    return all_predictions[:n]
 
-def generate_recommendations_for_all_users_dnn(dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10):
+def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10, batch_size=50):
     """
-    Generate recommendations for all users using the DNN model
+    Generate recommendations for all users using the DNN model with improved batching
     
     Input:
       - dnn_model: Trained DNN model
@@ -495,6 +436,7 @@ def generate_recommendations_for_all_users_dnn(dnn_model, user_genre_preferences
       - movie_genre_features: DataFrame with movie genre features
       - train_ratings: DataFrame with training ratings
       - n: Number of recommendations to generate per user
+      - batch_size: Number of users to process in each batch
     
     Output:
       - all_recommendations: Dictionary mapping user IDs to recommendation lists
@@ -507,27 +449,36 @@ def generate_recommendations_for_all_users_dnn(dnn_model, user_genre_preferences
     all_recommendations = {}
     total_users = len(user_ids)
     
-    # Process each user
-    for i, user_id in enumerate(user_ids):
-        recommendations = generate_dnn_recommendations(
-            user_id, 
-            dnn_model, 
-            user_genre_preferences, 
-            movie_genre_features, 
-            train_ratings, 
-            n
-        )
+    # Process users in batches
+    for i in range(0, total_users, batch_size):
+        batch_end = min(i + batch_size, total_users)
+        batch_users = user_ids[i:batch_end]
         
-        if recommendations:
-            all_recommendations[user_id] = recommendations
+        logger.info(f"Processing batch of {len(batch_users)} users ({i+1}-{batch_end} of {total_users})")
         
-        # Log progress
-        if (i+1) % 100 == 0 or (i+1) == total_users:
-            logger.info(f"Generated recommendations for {i+1}/{total_users} users ({(i+1)/total_users*100:.1f}%)")
+        for user_id in batch_users:
+            try:
+                # Set a timeout for each user's recommendation generation (optional)
+                recommendations = generate_dnn_recommendations(
+                    user_id, 
+                    dnn_model, 
+                    user_genre_preferences, 
+                    movie_genre_features, 
+                    train_ratings, 
+                    n
+                )
+                
+                if recommendations:
+                    all_recommendations[user_id] = recommendations
+            except Exception as e:
+                logger.error(f"Error generating recommendations for user {user_id}: {str(e)}")
+        
+        # Log progress at each batch
+        logger.info(f"Generated recommendations for {batch_end}/{total_users} users ({batch_end/total_users*100:.1f}%)")
     
     return all_recommendations
 
-def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
+def evaluate_recommendations(recommendations, test_ratings):
     """
     Evaluate recommendations using RMSE and MAE metrics
     
@@ -544,7 +495,6 @@ def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
     predictions = []
     actuals = []
     
-    # For each user in the test set
     # For each user in the test set
     for user_id in test_ratings['userId'].unique():
         # Skip users without recommendations
@@ -566,6 +516,7 @@ def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
             if movie_id in user_recs:
                 predictions.append(user_recs[movie_id])
                 actuals.append(actual_rating)
+    
     # Check if we have predictions to evaluate
     if not predictions:
         logger.warning("No predictions to evaluate")
@@ -593,81 +544,35 @@ def evaluate_recommendations_rmse_mae(recommendations, test_ratings):
     
     return metrics
 
-def combine_recommendations(content_based_recommendations, dnn_recommendations, alpha=0.5):
+def recommend_for_user(user_id, recommendations, movie_features=None, n=10):
     """
-    Combine content-based and DNN recommendations with weighted approach
+    Print recommendations for a specific user
     
     Input:
-      - content_based_recommendations: Dictionary with content-based recommendations
-      - dnn_recommendations: Dictionary with DNN recommendations
-      - alpha: Weight for content-based recommendations (1-alpha for DNN)
-    
-    Output:
-      - combined_recommendations: Dictionary with combined recommendations
-    """
-    logger.info("Combining content-based and DNN recommendations...")
-    
-    combined_recommendations = {}
-    
-    # Get all users from both recommendation sets
-    all_users = set(content_based_recommendations.keys()).union(set(dnn_recommendations.keys()))
-    
-    for user_id in all_users:
-        # Initialize combined recommendations dictionary for this user
-        user_combined_recs = {}
-        
-        # Add content-based recommendations if available
-        if user_id in content_based_recommendations:
-            for movie_id, score in content_based_recommendations[user_id]:
-                # Convert similarity score to rating scale (0.5-5.0)
-                # Assuming score is in [0,1] range
-                rating = 0.5 + 4.5 * score
-                user_combined_recs[movie_id] = alpha * rating
-        
-        # Add DNN recommendations if available
-        if user_id in dnn_recommendations:
-            for movie_id, rating in dnn_recommendations[user_id]:
-                if movie_id in user_combined_recs:
-                    user_combined_recs[movie_id] += (1 - alpha) * rating
-                else:
-                    user_combined_recs[movie_id] = (1 - alpha) * rating
-        
-        # Sort and convert to list of tuples
-        sorted_recs = sorted(user_combined_recs.items(), key=lambda x: x[1], reverse=True)
-        
-        combined_recommendations[user_id] = sorted_recs[:top_n]
-    
-    return combined_recommendations
-
-def recommend_for_user_combined(user_id, combined_recommendations, movie_features=None, n=10):
-    """
-    Generate and print combined recommendations for a specific user
-    
-    Input:
-      - user_id: User ID to generate recommendations for
-      - combined_recommendations: Dictionary with combined recommendations
-      - movie_features: DataFrame with movie features
+      - user_id: User ID to display recommendations for
+      - recommendations: Dictionary with recommendation lists
+      - movie_features: DataFrame with movie features (for titles)
       - n: Number of recommendations to display
     
     Output:
-      - recommendations: List of recommendations for the user
+      - None (prints recommendations)
     """
     # Check if user has recommendations
-    if user_id not in combined_recommendations:
-        print(f"No combined recommendations found for user {user_id}")
-        return None
+    if user_id not in recommendations:
+        print(f"No recommendations found for user {user_id}")
+        return
     
     # Get recommendations
-    recommendations = combined_recommendations[user_id][:n]
+    user_recs = recommendations[user_id][:n]
     
-    if not recommendations:
-        print(f"No combined recommendations found for user {user_id}")
-        return None
+    if not user_recs:
+        print(f"No recommendations found for user {user_id}")
+        return
     
     # Print recommendations
-    print(f"\nTop {len(recommendations)} combined recommendations for user {user_id}:")
+    print(f"\nTop {len(user_recs)} recommendations for user {user_id}:")
     
-    for i, (movie_id, predicted_rating) in enumerate(recommendations, 1):
+    for i, (movie_id, predicted_rating) in enumerate(user_recs, 1):
         movie_info = f"Movie ID: {movie_id}"
         
         # Try to get movie title if available
@@ -677,353 +582,153 @@ def recommend_for_user_combined(user_id, combined_recommendations, movie_feature
                 movie_info = movie_row.iloc[0]['title']
         
         print(f"{i}. {movie_info} - Predicted Rating: {predicted_rating:.2f}")
-    
-    return recommendations
 
 # Main execution flow
 if __name__ == "__main__":
+    print("\n" + "="*80)
+    print("COLLABORATIVE FILTERING WITH DEEP NEURAL NETWORK")
+    print("="*80)
+    
     # Step 1: Load Data
     data = load_data()
-    # Output: data dictionary with movie_features, ratings, train_ratings, test_ratings
+    if data is None:
+        logger.error("Failed to load required data")
+        exit(1)
 
     # Step 2: Extract Genre Features
-    if 'movie_features' in data:
-        movie_genre_features = extract_genre_features(data['movie_features'])
-        if movie_genre_features is not None:
-            data['movie_genre_features'] = movie_genre_features
-            # Output: movie_genre_features DataFrame with movieId and genre columns
-            
-            # Save genre features
-            movie_genre_features.to_csv(os.path.join(output_path, 'movie_genre_features.csv'), index=False)
-            logger.info(f"Saved genre features to {os.path.join(output_path, 'movie_genre_features.csv')}")
-
+    movie_genre_features = extract_genre_features(data['movie_features'])
+    if movie_genre_features is None:
+        logger.error("Failed to extract genre features")
+        exit(1)
+    
     # Step 3: Calculate User Genre Preferences
-    if 'train_ratings' in data and 'movie_genre_features' in data:
-        user_genre_preferences = calculate_user_genre_preferences(data['train_ratings'], data['movie_genre_features'])
-        data['user_genre_preferences'] = user_genre_preferences
-        # Output: user_genre_preferences DataFrame with userId and genre preference scores
-        
-        # Save user genre preferences
-        user_genre_preferences.to_csv(os.path.join(output_path, 'user_genre_preferences.csv'), index=False)
-        logger.info(f"Saved user genre preferences to {os.path.join(output_path, 'user_genre_preferences.csv')}")
-
+    user_genre_preferences = calculate_user_genre_preferences(data['train_ratings'], movie_genre_features)
+    
     # Step 4: Prepare Training Data for DNN
-    if all(key in data for key in ['train_ratings', 'user_genre_preferences', 'movie_genre_features']):
-        X_train, X_val, y_train, y_val, genre_columns = prepare_dnn_training_data(
-            data['train_ratings'], 
-            data['user_genre_preferences'], 
-            data['movie_genre_features']
-        )
-        # Output: X_train, X_val (feature matrices), y_train, y_val (target values)
-
+    X_train, X_val, y_train, y_val, genre_columns = prepare_dnn_training_data(
+        data['train_ratings'], 
+        user_genre_preferences, 
+        movie_genre_features
+    )
+    
     # Step 5: Build and Train DNN Model
-    if 'X_train' in locals() and 'X_val' in locals() and 'y_train' in locals() and 'y_val' in locals():
-        dnn_model, training_history = build_and_train_dnn_model(X_train, X_val, y_train, y_val)
-        data['dnn_model'] = dnn_model
-        data['dnn_training_history'] = training_history
-        # Output: dnn_model (trained model), training_history (training metrics)
-        
-        # Save DNN model
-        dnn_model.save(os.path.join(output_path, 'dnn_model.h5'))
-        
-        # Plot training history
-        plt.figure(figsize=(12, 5))
-        
-        # Plot MSE loss
-        plt.subplot(1, 2, 1)
-        plt.plot(training_history.history['loss'], label='Training MSE')
-        plt.plot(training_history.history['val_loss'], label='Validation MSE')
-        plt.title('Model MSE Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Mean Squared Error')
-        plt.legend()
-        
-        # Plot MAE
-        plt.subplot(1, 2, 2)
-        plt.plot(training_history.history['mae'], label='Training MAE')
-        plt.plot(training_history.history['val_mae'], label='Validation MAE')
-        plt.title('Model MAE')
-        plt.xlabel('Epoch')
-        plt.ylabel('Mean Absolute Error')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_path, 'dnn_training_history.png'))
-        
-        logger.info(f"Saved DNN model to {os.path.join(output_path, 'dnn_model.h5')}")
-        logger.info(f"Saved training history plot to {os.path.join(output_path, 'dnn_training_history.png')}")
-
-    # Step 6: Evaluate DNN Model on Test Set
-    if all(key in data for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'test_ratings']):
-        print("Evaluating DNN model on test set...")  # Add debug output
-        dnn_direct_metrics = evaluate_model_on_test_set(
-            data['dnn_model'],
-            data['user_genre_preferences'],
-            data['movie_genre_features'],
-            data['test_ratings']
-        )
-        # Make sure to store the metrics in the data dictionary
-        data['dnn_direct_metrics'] = dnn_direct_metrics
-        print(f"DNN evaluation complete. RMSE: {dnn_direct_metrics['rmse']:.4f}, MAE: {dnn_direct_metrics['mae']:.4f}")  # Add debug output
-    else:
-        print("Cannot evaluate DNN model - missing required data")  # Add debug output
-        # Print what's missing
-        for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'test_ratings']:
-            print(f"  - {key}: {'Present' if key in data else 'Missing'}")
-    # Step 7: Generate DNN Recommendations for All Users
-    if all(key in data for key in ['dnn_model', 'user_genre_preferences', 'movie_genre_features', 'train_ratings']):
-        dnn_recommendations = generate_recommendations_for_all_users_dnn(
-            data['dnn_model'],
-            data['user_genre_preferences'],
-            data['movie_genre_features'],
-            data['train_ratings'],
-            top_n
-        )
-        data['dnn_recommendations'] = dnn_recommendations
-        # Output: dnn_recommendations (dictionary mapping user IDs to recommendation lists)
-        
-        # Save recommendations
-        with open(os.path.join(output_path, 'dnn_recommendations.pkl'), 'wb') as f:
-            pickle.dump(dnn_recommendations, f)
-        
-        # Also save in a more readable CSV format
-        recommendations_list = []
-        
-        for user_id, recs in dnn_recommendations.items():
-            for rank, (movie_id, predicted_rating) in enumerate(recs, 1):
-                movie_title = "Unknown"
-                if 'movie_features' in data:
-                    movie_row = data['movie_features'][data['movie_features']['movieId'] == movie_id]
-                    if not movie_row.empty and 'title' in movie_row.columns:
-                        movie_title = movie_row.iloc[0]['title']
-                        
-                recommendations_list.append({
-                    'userId': user_id,
-                    'movieId': movie_id,
-                    'title': movie_title,
-                    'rank': rank,
-                    'predicted_rating': predicted_rating
-                })
-        
-        if recommendations_list:
-            recommendations_df = pd.DataFrame(recommendations_list)
-            recommendations_df.to_csv(os.path.join(output_path, 'dnn_recommendations.csv'), index=False)
-        
-        logger.info(f"Generated DNN recommendations for {len(dnn_recommendations)} users")
-
-    # Step 8: Evaluate DNN Recommendations
-    if 'dnn_recommendations' in data and 'test_ratings' in data:
-        dnn_evaluation_metrics = evaluate_recommendations_rmse_mae(
-            data['dnn_recommendations'],
-            data['test_ratings']
-        )
-        data['dnn_evaluation_metrics'] = dnn_evaluation_metrics
-        # Output: dnn_evaluation_metrics (dictionary with rmse, mae)
-        
-        # Save metrics
-        evaluation_results = pd.DataFrame([dnn_evaluation_metrics])
-        evaluation_results.to_csv(os.path.join(output_path, 'dnn_evaluation.csv'), index=False)
-        
-        # Display evaluation metrics
-        print("\nDNN Evaluation Results:")
-        print(f"RMSE: {dnn_evaluation_metrics['rmse']:.4f}")
-        print(f"MAE: {dnn_evaluation_metrics['mae']:.4f}")
-        print(f"Number of predictions evaluated: {dnn_evaluation_metrics['num_predictions']}")
-
-    # Step 9: Combine with Content-Based Recommendations (if available)
-    if 'content_based_recommendations' in data and 'dnn_recommendations' in data:
-        # Try different alpha values to find optimal weight
-        alpha_values = [0.1, 0.3, 0.5, 0.7, 0.9]
-        best_alpha = 0.5  # Default
-        best_rmse = float('inf')
-        
-        alpha_results = []
-        
-        for alpha in alpha_values:
-            combined_recs = combine_recommendations(
-                data['content_based_recommendations'],
-                data['dnn_recommendations'],
-                alpha
-            )
-            # Output for each alpha: combined_recs (dictionary with combined recommendations)
-            
-            # Evaluate combined recommendations
-            combined_metrics = evaluate_recommendations_rmse_mae(
-                combined_recs,
-                data['test_ratings']
-            )
-            
-            alpha_results.append({
-                'alpha': alpha,
-                'rmse': combined_metrics['rmse'],
-                'mae': combined_metrics['mae']
+    dnn_model, training_history = build_and_train_dnn_model(X_train, X_val, y_train, y_val)
+    
+    # Save DNN model
+    dnn_model.save(os.path.join(output_path, 'dnn_model.h5'))
+    logger.info(f"Saved DNN model to {os.path.join(output_path, 'dnn_model.h5')}")
+    
+    # Plot training history
+    plt.figure(figsize=(12, 5))
+    
+    # Plot MSE loss
+    plt.subplot(1, 2, 1)
+    plt.plot(training_history.history['loss'], label='Training MSE')
+    plt.plot(training_history.history['val_loss'], label='Validation MSE')
+    plt.title('Model MSE Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Squared Error')
+    plt.legend()
+    
+    # Plot MAE
+    plt.subplot(1, 2, 2)
+    plt.plot(training_history.history['mae'], label='Training MAE')
+    plt.plot(training_history.history['val_mae'], label='Validation MAE')
+    plt.title('Model MAE')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Absolute Error')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'dnn_training_history.png'))
+    logger.info(f"Saved training history plot to {os.path.join(output_path, 'dnn_training_history.png')}")
+    
+    # Step 6: Generate Recommendations for a Subset of Users
+    # Limit to 100 users for demonstration (can be increased)
+    max_users = 100  
+    dnn_recommendations = generate_recommendations_for_all_users(
+        dnn_model,
+        user_genre_preferences,
+        movie_genre_features,
+        data['train_ratings'],
+        top_n,
+        max_users
+    )
+    
+    # Save recommendations
+    with open(os.path.join(output_path, 'dnn_recommendations.pkl'), 'wb') as f:
+        pickle.dump(dnn_recommendations, f)
+    
+    # Also save in a more readable CSV format
+    recommendations_list = []
+    
+    for user_id, recs in dnn_recommendations.items():
+        for rank, (movie_id, predicted_rating) in enumerate(recs, 1):
+            movie_title = "Unknown"
+            movie_row = data['movie_features'][data['movie_features']['movieId'] == movie_id]
+            if not movie_row.empty and 'title' in movie_row.columns:
+                movie_title = movie_row.iloc[0]['title']
+                    
+            recommendations_list.append({
+                'userId': user_id,
+                'movieId': movie_id,
+                'title': movie_title,
+                'rank': rank,
+                'predicted_rating': predicted_rating
             })
-            
-            # Update best alpha if needed
-            if combined_metrics['rmse'] < best_rmse:
-                best_rmse = combined_metrics['rmse']
-                best_alpha = alpha
-        
-        # Save alpha comparison results
-        alpha_df = pd.DataFrame(alpha_results)
-        alpha_df.to_csv(os.path.join(output_path, 'alpha_comparison.csv'), index=False)
-        # Output: alpha_df (DataFrame with alpha comparison results)
-        
-        # Plot alpha comparison
-        plt.figure(figsize=(10, 6))
-        plt.plot(alpha_df['alpha'], alpha_df['rmse'], 'o-', label='RMSE')
-        plt.plot(alpha_df['alpha'], alpha_df['mae'], 's-', label='MAE')
-        plt.axvline(x=best_alpha, color='r', linestyle='--', label=f'Best Alpha: {best_alpha}')
-        plt.xlabel('Alpha (Weight of Content-Based Recommendations)')
-        plt.ylabel('Error Metric Value')
-        plt.title('Effect of Alpha on Recommendation Performance')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig(os.path.join(output_path, 'alpha_comparison.png'))
-        
-        # Generate final combined recommendations with best alpha
-        final_combined_recs = combine_recommendations(
-            data['content_based_recommendations'],
-            data['dnn_recommendations'],
-            best_alpha
-        )
-        data['combined_recommendations'] = final_combined_recs
-        # Output: final_combined_recs (dictionary with final combined recommendations)
-        
-        # Save combined recommendations
-        with open(os.path.join(output_path, 'combined_recommendations.pkl'), 'wb') as f:
-            pickle.dump(final_combined_recs, f)
-        
-        # Also save in a more readable CSV format
-        combined_recommendations_list = []
-        
-        for user_id, recs in final_combined_recs.items():
-            for rank, (movie_id, predicted_rating) in enumerate(recs, 1):
-                movie_title = "Unknown"
-                if 'movie_features' in data:
-                    movie_row = data['movie_features'][data['movie_features']['movieId'] == movie_id]
-                    if not movie_row.empty and 'title' in movie_row.columns:
-                        movie_title = movie_row.iloc[0]['title']
-                        
-                combined_recommendations_list.append({
-                    'userId': user_id,
-                    'movieId': movie_id,
-                    'title': movie_title,
-                    'rank': rank,
-                    'predicted_rating': predicted_rating
-                })
-        
-        if combined_recommendations_list:
-            combined_recommendations_df = pd.DataFrame(combined_recommendations_list)
-            combined_recommendations_df.to_csv(os.path.join(output_path, 'combined_recommendations.csv'), index=False)
-        # Output: combined_recommendations_df (DataFrame with combined recommendations)
-        
-        # Evaluate final combined recommendations
-        combined_evaluation_metrics = evaluate_recommendations_rmse_mae(
-            final_combined_recs,
-            data['test_ratings']
-        )
-        data['combined_evaluation_metrics'] = combined_evaluation_metrics
-        # Output: combined_evaluation_metrics (dictionary with evaluation metrics)
-        
-        # Save metrics
-        combined_evaluation_df = pd.DataFrame([combined_evaluation_metrics])
-        combined_evaluation_df.to_csv(os.path.join(output_path, 'combined_evaluation.csv'), index=False)
-        
-        logger.info(f"Generated combined recommendations with alpha={best_alpha} for {len(final_combined_recs)} users")
-        logger.info(f"Combined recommendations - RMSE: {combined_evaluation_metrics['rmse']:.4f}, MAE: {combined_evaluation_metrics['mae']:.4f}")
-
-    # Step 10: Display Sample Recommendations
-    if 'combined_recommendations' in data and 'movie_features' in data:
-        print("\n" + "="*80)
-        print("COMBINED MODEL RECOMMENDATIONS EXAMPLE")
-        print("="*80)
-        
-        # Find a user with combined recommendations
-        if data['combined_recommendations']:
-            sample_user_id = next(iter(data['combined_recommendations'].keys()))
-            
-            print(f"\nGenerating sample combined recommendations for User ID {sample_user_id}:")
-            
-            # Get user ratings for context
-            if 'train_ratings' in data: 
-                user_ratings = data['train_ratings'][data['train_ratings']['userId'] == sample_user_id]
-                
-                print(f"\nThis user has rated {len(user_ratings)} movies.")
-                if len(user_ratings) > 0:
-                    print("Sample of their highest-rated movies:")
-                    
-                    # Get top 5 highest-rated movies
-                    top_rated = user_ratings.sort_values('rating', ascending=False).head(5)
-                    
-                    for _, row in top_rated.iterrows():
-                        movie_info = f"Movie ID: {row['movieId']}"
-                        if 'movie_features' in data:
-                            movie_row = data['movie_features'][data['movie_features']['movieId'] == row['movieId']]
-                            if not movie_row.empty and 'title' in movie_row.columns:
-                                movie_info = movie_row.iloc[0]['title']
-                        print(f"  {movie_info} - Rating: {row['rating']}")
-            
-            # Generate combined recommendations
-            recommend_for_user_combined(
-                sample_user_id, 
-                data['combined_recommendations'], 
-                data.get('movie_features'),
-                n=10
-            )
+    
+    if recommendations_list:
+        recommendations_df = pd.DataFrame(recommendations_list)
+        recommendations_df.to_csv(os.path.join(output_path, 'dnn_recommendations.csv'), index=False)
+    
+    logger.info(f"Generated DNN recommendations for {len(dnn_recommendations)} users")
+    
+    # Step 7: Evaluate Recommendations
+    evaluation_metrics = evaluate_recommendations(
+        dnn_recommendations,
+        data['test_ratings']
+    )
+    
+    # Save metrics
+    evaluation_results = pd.DataFrame([evaluation_metrics])
+    evaluation_results.to_csv(os.path.join(output_path, 'dnn_evaluation.csv'), index=False)
+    
+    # Display evaluation metrics
+    print("\nDNN Evaluation Results:")
+    print(f"RMSE: {evaluation_metrics['rmse']:.4f}")
+    print(f"MAE: {evaluation_metrics['mae']:.4f}")
+    print(f"Number of predictions evaluated: {evaluation_metrics['num_predictions']}")
+    
+    # Display sample recommendations for a few users
+    if dnn_recommendations:
+        sample_user_id = next(iter(dnn_recommendations.keys()))
+        recommend_for_user(sample_user_id, dnn_recommendations, data['movie_features'])
     
     # Final Summary
     print("\n" + "="*80)
-    print("SUMMARY: MEMORY-BASED COLLABORATIVE FILTERING WITH DNN")
+    print("SUMMARY: COLLABORATIVE FILTERING WITH DNN")
     print("="*80)
     
     # Display model architecture
     print("\nDNN Model Architecture:")
-    if 'dnn_model' in data:
-        data['dnn_model'].summary(print_fn=print)
-        print(f"\nNumber of layers: {len(data['dnn_model'].layers)}")
-        print(f"Hidden layer sizes: {dnn_hidden_layers}")
-        print(f"Dropout rate: {dnn_dropout_rate}")
-        print(f"Learning rate: {dnn_learning_rate}")
-        print(f"Batch size: {dnn_batch_size}")
-    
-    # User genre preferences
-    if 'user_genre_preferences' in data:
-        print(f"\nCalculated genre preferences for {len(data['user_genre_preferences'])} users")
-        genre_columns = [col for col in data['user_genre_preferences'].columns if col != 'userId']
-        print(f"Genre features: {len(genre_columns)} dimensions")
+    dnn_model.summary(print_fn=print)
+    print(f"\nNumber of layers: {len(dnn_model.layers)}")
+    print(f"Hidden layer sizes: {dnn_hidden_layers}")
+    print(f"Dropout rate: {dnn_dropout_rate}")
+    print(f"Learning rate: {dnn_learning_rate}")
+    print(f"Batch size: {dnn_batch_size}")
     
     # Display performance metrics
-    print("\nPerformance Metrics Comparison:")
+    print("\nPerformance Metrics:")
     headers = ["Model", "RMSE", "MAE", "Predictions Evaluated"]
-    rows = []
-    
-    # Content-based model metrics (if available)
-    if 'content_based_evaluation' in data:
-        rows.append([
-            "Content-Based (Log-Likelihood + Word2Vec)",
-            f"{data['content_based_evaluation']['rmse']:.4f}",
-            f"{data['content_based_evaluation']['mae']:.4f}",
-            str(data['content_based_evaluation']['num_predictions'])
-        ])
-    
-    # DNN model metrics
-    if 'dnn_direct_metrics' in data:
-        rows.append([
-            "Memory-Based (DNN)",
-            f"{data['dnn_direct_metrics']['rmse']:.4f}",
-            f"{data['dnn_direct_metrics']['mae']:.4f}",
-            str(data['dnn_direct_metrics']['num_predictions'])
-        ])
-    
-    # Combined model metrics
-    if 'combined_evaluation_metrics' in data:
-        rows.append([
-            f"Hybrid (α={best_alpha})",
-            f"{data['combined_evaluation_metrics']['rmse']:.4f}",
-            f"{data['combined_evaluation_metrics']['mae']:.4f}",
-            str(data['combined_evaluation_metrics']['num_predictions'])
-        ])
+    rows = [
+        [
+            "Collaborative Filtering (DNN)",
+            f"{evaluation_metrics['rmse']:.4f}",
+            f"{evaluation_metrics['mae']:.4f}",
+            str(evaluation_metrics['num_predictions'])
+        ]
+    ]
     
     # Print table
     col_widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers))]
@@ -1035,26 +740,29 @@ if __name__ == "__main__":
     print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
     
     # Recommendations statistics
-    print("\nRecommendation Statistics:")
-    if 'dnn_recommendations' in data:
-        avg_dnn_recs = sum(len(recs) for recs in data['dnn_recommendations'].values()) / len(data['dnn_recommendations'])
-        print(f"- Average DNN recommendations per user: {avg_dnn_recs:.2f}")
-    if 'combined_recommendations' in data:
-        avg_combined_recs = sum(len(recs) for recs in data['combined_recommendations'].values()) / len(data['combined_recommendations'])
-        print(f"- Average combined recommendations per user: {avg_combined_recs:.2f}")
+    if dnn_recommendations:
+        avg_recs = sum(len(recs) for recs in dnn_recommendations.values()) / len(dnn_recommendations)
+        print(f"\nRecommendation Statistics:")
+        print(f"- Users with recommendations: {len(dnn_recommendations)}")
+        print(f"- Average recommendations per user: {avg_recs:.2f}")
     
-    # Model advantages
-    print("\nAdvantages of DNN-based Collaborative Filtering:")
-    print("- Captures non-linear relationships between user preferences and movie genres")
-    print("- Automatically extracts complex patterns from rating data")
-    print("- Effectively addresses the cold-start problem for new users")
-    print("- Can model implicit feedback and preference strength")
-    print("- High scalability with large datasets")
     
-    # Saved files
-    print("\nFiles Generated:")
-    for file in os.listdir(output_path):
-        if file.startswith('dnn_') or file.startswith('combined_'):
-            print(f"- {file}")
-    
-    print("\nMemory-Based Collaborative Filtering with DNN Successfully Implemented!")
+    # Save batch file to run recommendations for any user
+import pickle
+import sys
+
+# Define path to model and data
+recommendation_path = "{output_path}"
+model_path = os.path.join(recommendation_path, 'dnn_model.h5')
+
+# Check if model exists
+if not os.path.exists(model_path):
+    print("Error: Model not found at", model_path)
+    sys.exit(1)
+
+
+# Load the model
+model = load_model(model_path)
+print("Model loaded successfully from", model_path)
+
+# Load other
