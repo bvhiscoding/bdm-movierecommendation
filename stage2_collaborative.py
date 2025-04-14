@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Set paths
 input_path = "./"  # Current directory where stage1.py saved the files
 output_path = "./collaborative-recommendations"
-top_n = 10
+top_n = 50
 
 # Create output directory if it doesn't exist
 if not os.path.exists(output_path):
@@ -444,7 +444,13 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     logger.info(f"Generating top-{n} DNN recommendations for all users...")
     
     # Get all user IDs
-    user_ids = user_genre_preferences['userId'].unique()
+    all_user_ids = user_genre_preferences['userId'].unique()
+    
+    # Limit to max_users if specified
+    if max_users and max_users < len(all_user_ids):
+        user_ids = all_user_ids[:max_users]
+    else:
+        user_ids = all_user_ids
     
     all_recommendations = {}
     total_users = len(user_ids)
@@ -478,16 +484,9 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     
     return all_recommendations
 
-def evaluate_recommendations(recommendations, test_ratings):
+def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_genre_preferences, movie_genre_features):
     """
-    Evaluate recommendations using RMSE and MAE metrics
-    
-    Input:
-      - recommendations: Dictionary mapping user IDs to recommendation lists
-      - test_ratings: DataFrame with test ratings
-    
-    Output:
-      - metrics: Dictionary with evaluation metrics (rmse, mae)
+    Evaluate recommendations using RMSE and MAE metrics with expanded predictions
     """
     logger.info("Evaluating recommendations using RMSE and MAE...")
     
@@ -497,15 +496,17 @@ def evaluate_recommendations(recommendations, test_ratings):
     
     # For each user in the test set
     for user_id in test_ratings['userId'].unique():
-        # Skip users without recommendations
-        if user_id not in recommendations:
+        # Skip users without genre preferences
+        if user_id not in user_genre_preferences['userId'].values:
             continue
         
         # Get user's test ratings
         user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
         
-        # Get user's recommendations (movie_id, predicted_rating)
-        user_recs = dict(recommendations[user_id])
+        # Get user's recommendations (movie_id, predicted_rating) if available
+        user_recs = {}
+        if user_id in recommendations:
+            user_recs = dict(recommendations[user_id])
         
         # Match test ratings with predictions
         for _, row in user_test_ratings.iterrows():
@@ -516,6 +517,25 @@ def evaluate_recommendations(recommendations, test_ratings):
             if movie_id in user_recs:
                 predictions.append(user_recs[movie_id])
                 actuals.append(actual_rating)
+            # Otherwise, make a new prediction for this movie
+            elif movie_id in movie_genre_features['movieId'].values:
+                # Generate feature vector for this user-movie pair
+                feature_vector = generate_user_movie_features(
+                    user_id, 
+                    movie_id, 
+                    user_genre_preferences, 
+                    movie_genre_features
+                )
+                
+                if feature_vector is not None:
+                    # Predict rating
+                    predicted_rating = dnn_model.predict(feature_vector, verbose=0)[0][0]
+                    # Ensure rating is within bounds
+                    predicted_rating = max(0.5, min(5.0, predicted_rating))
+                    
+                    predictions.append(predicted_rating)
+                    actuals.append(actual_rating)
+    
     
     # Check if we have predictions to evaluate
     if not predictions:
@@ -645,7 +665,7 @@ if __name__ == "__main__":
     
     # Step 6: Generate Recommendations for a Subset of Users
     # Limit to 100 users for demonstration (can be increased)
-    max_users = 100  
+    max_users = len(user_genre_preferences['userId'].unique())
     dnn_recommendations = generate_recommendations_for_all_users(
         dnn_model,
         user_genre_preferences,
@@ -686,7 +706,10 @@ if __name__ == "__main__":
     # Step 7: Evaluate Recommendations
     evaluation_metrics = evaluate_recommendations(
         dnn_recommendations,
-        data['test_ratings']
+        data['test_ratings'],
+        dnn_model,
+        user_genre_preferences,
+        movie_genre_features
     )
     
     # Save metrics

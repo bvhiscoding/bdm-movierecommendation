@@ -156,73 +156,73 @@ print("\n" + "="*80)
 print("STEP 3: LOG-LIKELIHOOD CALCULATION")
 print("="*80)
 
-# def calculate_log_likelihood(movie_features, corpus_word_counts):
-#     """Calculate Log-Likelihood values for words in each movie"""
-#     print("Calculating Log-Likelihood values for all movies...")
-#     start_time = time.time()
-    
-#     # Calculate total corpus size
-#     total_corpus_size = sum(corpus_word_counts.values())
-#     print(f"Total corpus size: {total_corpus_size} words")
-    
-#     # Initialize container for movie features
-#     movie_ll_values = {}
-    
-#     # Process each movie document
-#     total_movies = len(movie_features)
-#     for i, (_, row) in enumerate(movie_features.iterrows()):
-#         movie_id = row['movieId']
-#         tokens = row['tokens']
-        
-#         if not tokens:
-#             continue
-        
-#         # Count word occurrences in this movie
-#         movie_word_counts = Counter(tokens)
-#         movie_size = sum(movie_word_counts.values())
-        
-#         # Calculate Log-Likelihood for each word
-#         movie_ll_values[movie_id] = {}
-        
-#         for word, count in movie_word_counts.items():
-#             # Observed frequencies
-#             a = count  # Occurrences in this movie
-#             b = corpus_word_counts[word] - count  # Occurrences in other movies
-#             c = movie_size  # Total words in this movie
-#             d = total_corpus_size - movie_size  # Total words in other movies
-            
-#             # Expected counts based on corpus distribution
-#             e1 = c * (a + b) / (c + d)
-#             e2 = d * (a + b) / (c + d)
-            
-#             # Log-Likelihood calculation
-#             ll = 0
-#             if a > 0 and e1 > 0:
-#                 ll += a * math.log(a / e1)
-#             if b > 0 and e2 > 0:
-#                 ll += b * math.log(b / e2)
-            
-#             ll = 2 * ll
-#             movie_ll_values[movie_id][word] = ll
-        
-#         # Log progress
-#         if (i+1) % 1000 == 0 or (i+1) == total_movies:
-#             elapsed = time.time() - start_time
-#             print(f"Processed {i+1}/{total_movies} movies ({(i+1)/total_movies*100:.1f}%) - Elapsed: {elapsed:.2f}s")
-    
-#     # Show sample LL values for a movie
-#     if movie_ll_values:
-#         sample_movie_id = next(iter(movie_ll_values.keys()))
-#         sample_movie_title = movie_features[movie_features['movieId'] == sample_movie_id]['title'].values[0]
-#         print(f"\nSample Log-Likelihood values for movie '{sample_movie_title}' (ID: {sample_movie_id}):")
-        
-#         # Get top 10 words by LL value
-#         top_ll_words = sorted(movie_ll_values[sample_movie_id].items(), key=lambda x: x[1], reverse=True)[:10]
-#         for word, ll_value in top_ll_words:
-#             print(f"Word: '{word}', LL Value: {ll_value:.2f}")
-    
-#     return movie_ll_values
 def calculate_log_likelihood(movie_features, corpus_word_counts):
+    """Calculate Log-Likelihood values for words in each movie"""
+    print("Calculating Log-Likelihood values for all movies...")
+    start_time = time.time()
+    
+    # Calculate total corpus size
+    total_corpus_size = sum(corpus_word_counts.values())
+    print(f"Total corpus size: {total_corpus_size} words")
+    
+    # Initialize container for movie features
+    movie_ll_values = {}
+    
+    # Process each movie document
+    total_movies = len(movie_features)
+    for i, (_, row) in enumerate(movie_features.iterrows()):
+        movie_id = row['movieId']
+        tokens = row['tokens']
+        
+        if not tokens:
+            continue
+        
+        # Count word occurrences in this movie
+        movie_word_counts = Counter(tokens)
+        movie_size = sum(movie_word_counts.values())
+        
+        # Calculate Log-Likelihood for each word
+        movie_ll_values[movie_id] = {}
+        
+        for word, count in movie_word_counts.items():
+            # Observed frequencies
+            a = count  # Occurrences in this movie
+            b = corpus_word_counts[word] - count  # Occurrences in other movies
+            c = movie_size  # Total words in this movie
+            d = total_corpus_size - movie_size  # Total words in other movies
+            
+            # Expected counts based on corpus distribution
+            e1 = c * (a + b) / (c + d)
+            e2 = d * (a + b) / (c + d)
+            
+            # Log-Likelihood calculation
+            ll = 0
+            if a > 0 and e1 > 0:
+                ll += a * math.log(a / e1)
+            if b > 0 and e2 > 0:
+                ll += b * math.log(b / e2)
+            
+            ll = 2 * ll
+            movie_ll_values[movie_id][word] = ll
+        
+        # Log progress
+        if (i+1) % 1000 == 0 or (i+1) == total_movies:
+            elapsed = time.time() - start_time
+            print(f"Processed {i+1}/{total_movies} movies ({(i+1)/total_movies*100:.1f}%) - Elapsed: {elapsed:.2f}s")
+    
+    # Show sample LL values for a movie
+    if movie_ll_values:
+        sample_movie_id = next(iter(movie_ll_values.keys()))
+        sample_movie_title = movie_features[movie_features['movieId'] == sample_movie_id]['title'].values[0]
+        print(f"\nSample Log-Likelihood values for movie '{sample_movie_title}' (ID: {sample_movie_id}):")
+        
+        # Get top 10 words by LL value
+        top_ll_words = sorted(movie_ll_values[sample_movie_id].items(), key=lambda x: x[1], reverse=True)[:10]
+        for word, ll_value in top_ll_words:
+            print(f"Word: '{word}', LL Value: {ll_value:.2f}")
+    
+    return movie_ll_values
+# def calculate_log_likelihood(movie_features, corpus_word_counts):
     """Enhanced calculation of Log-Likelihood values for words in each movie with smoothing"""
     print("Calculating enhanced Log-Likelihood values for all movies...")
     start_time = time.time()
