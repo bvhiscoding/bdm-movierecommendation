@@ -17,6 +17,8 @@ nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
 nltk.download('wordnet', quiet=True)
 nltk.download('averaged_perceptron_tagger', quiet=True)
+nltk.download('maxent_ne_chunker', quiet=True)
+nltk.download('words', quiet=True)
 
 print("Libraries imported successfully!")
 
@@ -25,22 +27,22 @@ print("\n" + "="*80)
 print("STEP 1: MOVIE TEXT FEATURE EXTRACTION")
 print("="*80)
 # Load MovieLens movie data
-movies_df = pd.read_csv('extracted_data/extracted_movies.csv')
+movies_df = pd.read_csv('./extracted_data/extracted_movies.csv')
 print(f"Loaded {len(movies_df)} movies from MovieLens dataset")
 print(movies_df.head(3))
 
 # Load TMDB data (containing movie overviews, cast, director)
-tmdb_df = pd.read_csv('extracted_data/tmdb.csv')
+tmdb_df = pd.read_csv('./extracted_data/tmdb.csv')
 print(f"\nLoaded {len(tmdb_df)} movies from TMDB dataset")
 print(tmdb_df.head(3)[['id', 'tmdb_title', 'overview']])
 
 # Load links data to connect MovieLens IDs with TMDB IDs
-links_df = pd.read_csv('extracted_data/extracted_links.csv')
+links_df = pd.read_csv('./extracted_data/extracted_links.csv')
 print(f"\nLoaded {len(links_df)} movie links")
 print(links_df.head(3))
 
 # Load tags data for additional text information
-tags_df = pd.read_csv('extracted_data/extracted_tags.csv')
+tags_df = pd.read_csv('./extracted_data/extracted_tags.csv')
 print(f"\nLoaded {len(tags_df)} movie tags")
 print(tags_df.head(3))
 # Merge movie data with TMDB data via links_df
@@ -97,10 +99,31 @@ def get_wordnet_pos(tag):
     }
     return tag_dict.get(tag[0].upper(), wordnet.NOUN)
 
+def preserve_full_names(text):
+    """Preserve full names as single tokens by replacing spaces with underscores"""
+    if not isinstance(text, str):
+        return ""
+    
+    # Pattern to identify potential names (two or more capitalized words in sequence)
+    # This will match names like "Tom Hanks", "Robert De Niro", etc.
+    name_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'
+    
+    # Find all matches
+    matches = re.findall(name_pattern, text)
+    
+    # Replace spaces with underscores in the matched names
+    for name in matches:
+        text = text.replace(name, name.replace(' ', '_'))
+    
+    return text
+
 def clean_text(text):
     """Clean and normalize text"""
     if not isinstance(text, str):
         return ""
+    
+    # First preserve full names
+    text = preserve_full_names(text)
     
     # Remove HTML tags
     text = re.sub(r'<.*?>', ' ', text)
@@ -108,9 +131,9 @@ def clean_text(text):
     # Convert to lowercase
     text = text.lower()
     
-    # Remove special characters and digits
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = re.sub(r'\d+', ' ', text)
+    # Remove special characters but keep underscores (for preserved names)
+    text = re.sub(r'[^\w\s_]', ' ', text)
+    text = re.sub(r'\d+', ' ', text)  # Remove digits
     
     # Remove extra spaces
     text = re.sub(r'\s+', ' ', text)
@@ -128,19 +151,31 @@ def preprocess_text(text, stop_words, lemmatizer):
     # Tokenize text
     tokens = word_tokenize(cleaned_text)
     
-    # Remove stopwords and short words
-    tokens = [word for word in tokens if word not in stop_words and len(word) > 1]
+    # Remove stopwords and short words, but keep tokens with underscores (names)
+    tokens = [word for word in tokens if (word not in stop_words and len(word) > 1) or '_' in word]
     
     try:
-        # Try lemmatizing tokens with POS tagging
-        tagged_tokens = pos_tag(tokens)
-        lemmatized_tokens = [lemmatizer.lemmatize(word, get_wordnet_pos(tag)) 
-                           for word, tag in tagged_tokens]
+        # Try lemmatizing tokens with POS tagging, but don't lemmatize names with underscores
+        lemmatized_tokens = []
+        for word in tokens:
+            if '_' in word:
+                # Don't lemmatize names, just replace underscores with spaces
+                lemmatized_tokens.append(word.replace('_', ' '))
+            else:
+                # Get POS tag for regular words
+                pos = pos_tag([word])
+                lemmatized_tokens.append(lemmatizer.lemmatize(word, get_wordnet_pos(pos[0][1])))
     except LookupError:
         # Fallback to simple lemmatization without POS tagging
-        lemmatized_tokens = [lemmatizer.lemmatize(word) for word in tokens]
+        lemmatized_tokens = []
+        for word in tokens:
+            if '_' in word:
+                lemmatized_tokens.append(word.replace('_', ' '))
+            else:
+                lemmatized_tokens.append(lemmatizer.lemmatize(word))
     
     return lemmatized_tokens
+
 # Initialize NLTK tools
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
@@ -200,7 +235,7 @@ print("STEP 3: DATA NORMALIZATION")
 print("="*80)
 
 # Load user ratings data
-ratings_df = pd.read_csv('extracted_data/extracted_ratings.csv')
+ratings_df = pd.read_csv('./extracted_data/extracted_ratings.csv')
 print(f"Loaded {len(ratings_df)} ratings from {len(ratings_df['userId'].unique())} users")
 print(ratings_df.head())
 
@@ -276,6 +311,7 @@ def normalize_ratings(ratings_df):
     merged_df.loc[~mask_diff, 'normalized_rating'] = 0.5
     
     return merged_df[['userId', 'movieId', 'rating', 'normalized_rating']]
+
 # Apply normalization
 print("\nNormalizing ratings...")
 normalized_ratings = normalize_ratings(ratings_df)
@@ -441,4 +477,21 @@ print(f"2. Preprocessed text resulting in a vocabulary of {len(corpus_word_count
 print(f"3. Normalized {len(normalized_ratings)} ratings from {len(user_stats)} users")
 print(f"4. Created one-hot encodings for {len(all_genres)} genres")
 print(f"5. Final dataset contains {len(movie_features)} movies with complete feature sets")
+print("="*80)
+
+# Count the number of actor names preserved in the tokens
+actor_name_count = 0
+total_tokens = 0
+
+for tokens in movie_features['tokens']:
+    if isinstance(tokens, list):
+        for token in tokens:
+            total_tokens += 1
+            if ' ' in token:  # Tokens with spaces are preserved actor names
+                actor_name_count += 1
+
+actor_name_percentage = (actor_name_count / total_tokens) * 100 if total_tokens > 0 else 0
+print(f"\nActor name statistics:")
+print(f"- Total tokens: {total_tokens}")
+print(f"- Actor name tokens: {actor_name_count} ({actor_name_percentage:.2f}%)")
 print("="*80)
