@@ -18,6 +18,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 import ast  # To safely evaluate string representations of lists
 import sys
+import gc  # Add garbage collector for memory management
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
@@ -30,22 +31,21 @@ print("="*80)
 # Set paths
 input_path = "./"  # Current directory where stage1.py saved the files
 output_path = "./content-recommendations"
-top_n = 10
+top_n = 20
 
 # Create output directory if it doesn't exist
 if not os.path.exists(output_path):
     os.makedirs(output_path)
 
-# Initialize NLTK tools
-nltk.download('punkt', quiet=True)
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
+# # Initialize NLTK tools
+# nltk.download('punkt', quiet=True)
+# nltk.download('stopwords', quiet=True)
+# nltk.download('wordnet', quiet=True)
+# stop_words = set(stopwords.words('english'))
+# lemmatizer = WordNetLemmatizer()
 
-
-# Model parameters
-similarity_threshold = 0.3  # Minimum similarity to consider
+# Model parameters/
+similarity_threshold = 0.9  # Minimum similarity to consider
 word2vec_dim = 100  # Dimensionality of Word2Vec embeddings
 
 print("\n" + "="*80)
@@ -62,6 +62,7 @@ def load_data():
     # Load movie features
     movie_features_path = os.path.join(input_path, './processed/processed_movie_features.csv')
     if os.path.exists(movie_features_path):
+        # First, load without the tokens column to save memory
         data['movie_features'] = pd.read_csv(movie_features_path)
         # Convert string representation of tokens and top_keywords back to lists
         data['movie_features']['tokens'] = data['movie_features']['tokens'].apply(
@@ -85,7 +86,12 @@ def load_data():
     # Load normalized ratings
     ratings_path = os.path.join(input_path, './processed/normalized_ratings.csv')
     if os.path.exists(ratings_path):
-        data['ratings'] = pd.read_csv(ratings_path)
+        # Read in chunks to save memory
+        chunk_size = 100000  # Adjust based on dataset size
+        chunks = []
+        for chunk in pd.read_csv(ratings_path, chunksize=chunk_size):
+            chunks.append(chunk)
+        data['ratings'] = pd.concat(chunks)
         print(f"\nLoaded {len(data['ratings'])} normalized ratings")
         print("\nSample of normalized ratings data:")
         print(data['ratings'].head(3))
@@ -106,17 +112,30 @@ def load_data():
         
         # Group by user to ensure each user has both training and testing data
         user_groups = data['ratings'].groupby('userId')
-        train_data = []
-        test_data = []
+        train_chunks = []
+        test_chunks = []
         
-        for _, group in user_groups:
+        user_count = 0
+        total_users = len(user_groups)
+        
+        for user_id, group in user_groups:
             n = len(group)
             split_idx = int(n * 0.8)
-            train_data.append(group.iloc[:split_idx])
-            test_data.append(group.iloc[split_idx:])
+            train_chunks.append(group.iloc[:split_idx])
+            test_chunks.append(group.iloc[split_idx:])
+            
+            user_count += 1
+            # Process in batches to avoid excessive memory usage
+            if len(train_chunks) >= 1000 or user_count == total_users:
+                gc.collect()  # Force garbage collection
         
-        data['train_ratings'] = pd.concat(train_data).reset_index(drop=True)
-        data['test_ratings'] = pd.concat(test_data).reset_index(drop=True)
+        # Concatenate all chunks
+        data['train_ratings'] = pd.concat(train_chunks).reset_index(drop=True)
+        data['test_ratings'] = pd.concat(test_chunks).reset_index(drop=True)
+        
+        # Free memory
+        del train_chunks, test_chunks
+        gc.collect()
         
         print(f"\nSplit ratings into {len(data['train_ratings'])} training and {len(data['test_ratings'])} testing samples")
         print(f"Training set covers {data['train_ratings']['userId'].nunique()} users and {data['train_ratings']['movieId'].nunique()} movies")
@@ -136,8 +155,20 @@ if 'movie_features' in data:
     print("Building vocabulary and word frequency counts...")
     
     corpus_word_counts = Counter()
-    for tokens in data['movie_features']['tokens']:
-        corpus_word_counts.update(tokens)
+    
+    # Process in batches to avoid memory spikes
+    batch_size = 1000
+    total_movies = len(data['movie_features'])
+    
+    for i in range(0, total_movies, batch_size):
+        batch_end = min(i + batch_size, total_movies)
+        batch = data['movie_features'].iloc[i:batch_end]
+        
+        for tokens in batch['tokens']:
+            corpus_word_counts.update(tokens)
+        
+        # Log progress
+        print(f"Processed {batch_end}/{total_movies} movies ({batch_end/total_movies*100:.1f}%)")
     
     data['corpus_word_counts'] = corpus_word_counts
     
@@ -153,13 +184,16 @@ if 'movie_features' in data:
     for word, count in corpus_word_counts.most_common(20):
         print(f"'{word}': {count}")
 
+    # Clear memory
+    gc.collect()
+
 print("\n" + "="*80)
 print("STEP 3: LOG-LIKELIHOOD CALCULATION")
 print("="*80)
 
-def calculate_log_likelihood(movie_features, corpus_word_counts):
-    """Calculate Log-Likelihood values for words in each movie"""
-    print("Calculating Log-Likelihood values for all movies...")
+def calculate_log_likelihood(movie_features, corpus_word_counts, batch_size=100):
+    """Calculate Log-Likelihood values for words in each movie in batches"""
+    print("Calculating Log-Likelihood values for all movies in batches...")
     start_time = time.time()
     
     # Calculate total corpus size
@@ -169,47 +203,59 @@ def calculate_log_likelihood(movie_features, corpus_word_counts):
     # Initialize container for movie features
     movie_ll_values = {}
     
-    # Process each movie document
+    # Process each movie document in batches
     total_movies = len(movie_features)
-    for i, (_, row) in enumerate(movie_features.iterrows()):
-        movie_id = row['movieId']
-        tokens = row['tokens']
+    
+    for batch_start in range(0, total_movies, batch_size):
+        batch_end = min(batch_start + batch_size, total_movies)
+        print(f"Processing batch {batch_start//batch_size + 1}: movies {batch_start+1}-{batch_end} of {total_movies}")
         
-        if not tokens:
-            continue
+        # Get batch of movies
+        batch = movie_features.iloc[batch_start:batch_end]
         
-        # Count word occurrences in this movie
-        movie_word_counts = Counter(tokens)
-        movie_size = sum(movie_word_counts.values())
-        
-        # Calculate Log-Likelihood for each word
-        movie_ll_values[movie_id] = {}
-        
-        for word, count in movie_word_counts.items():
-            # Observed frequencies
-            a = count  # Occurrences in this movie
-            b = corpus_word_counts[word] - count  # Occurrences in other movies
-            c = movie_size  # Total words in this movie
-            d = total_corpus_size - movie_size  # Total words in other movies
+        for _, row in batch.iterrows():
+            movie_id = row['movieId']
+            tokens = row['tokens']
             
-            # Expected counts based on corpus distribution
-            e1 = c * (a + b) / (c + d)
-            e2 = d * (a + b) / (c + d)
+            if not tokens:
+                continue
             
-            # Log-Likelihood calculation
-            ll = 0
-            if a > 0 and e1 > 0:
-                ll += a * math.log(a / e1)
-            if b > 0 and e2 > 0:
-                ll += b * math.log(b / e2)
+            # Count word occurrences in this movie
+            movie_word_counts = Counter(tokens)
+            movie_size = sum(movie_word_counts.values())
             
-            ll = 2 * ll
-            movie_ll_values[movie_id][word] = ll
+            # Calculate Log-Likelihood for each word
+            movie_ll_values[movie_id] = {}
+            
+            for word, count in movie_word_counts.items():
+                # Observed frequencies
+                a = count  # Occurrences in this movie
+                b = corpus_word_counts[word] - count  # Occurrences in other movies
+                c = movie_size  # Total words in this movie
+                d = total_corpus_size - movie_size  # Total words in other movies
+                
+                # Expected counts based on corpus distribution
+                e1 = c * (a + b) / (c + d)
+                e2 = d * (a + b) / (c + d)
+                
+                # Log-Likelihood calculation
+                ll = 0
+                if a > 0 and e1 > 0:
+                    ll += a * math.log(a / e1)
+                if b > 0 and e2 > 0:
+                    ll += b * math.log(b / e2)
+                
+                ll = 2 * ll
+                movie_ll_values[movie_id][word] = ll
         
-        # Log progress
-        if (i+1) % 1000 == 0 or (i+1) == total_movies:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_movies} movies ({(i+1)/total_movies*100:.1f}%) - Elapsed: {elapsed:.2f}s")
+        # Log progress and elapsed time
+        elapsed = time.time() - start_time
+        progress = batch_end / total_movies * 100
+        remaining = elapsed / (batch_end - batch_start) * (total_movies - batch_end) if batch_end < total_movies else 0
+        print(f"Progress: {progress:.1f}% - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        
+        # Force garbage collection after each batch
+        gc.collect()
     
     # Show sample LL values for a movie
     if movie_ll_values:
@@ -223,86 +269,10 @@ def calculate_log_likelihood(movie_features, corpus_word_counts):
             print(f"Word: '{word}', LL Value: {ll_value:.2f}")
     
     return movie_ll_values
-# def calculate_log_likelihood(movie_features, corpus_word_counts):
-    """Enhanced calculation of Log-Likelihood values for words in each movie with smoothing"""
-    print("Calculating enhanced Log-Likelihood values for all movies...")
-    start_time = time.time()
-    
-    # Calculate total corpus size
-    total_corpus_size = sum(corpus_word_counts.values())
-    print(f"Total corpus size: {total_corpus_size} words")
-    
-    # Initialize container for movie features
-    movie_ll_values = {}
-    
-    # Smoothing parameter to handle zero frequencies
-    alpha = 0.01
-    
-    # Process each movie document
-    total_movies = len(movie_features)
-    for i, (_, row) in enumerate(movie_features.iterrows()):
-        movie_id = row['movieId']
-        tokens = row['tokens']
-        
-        if not tokens:
-            continue
-        
-        # Count word occurrences in this movie
-        movie_word_counts = Counter(tokens)
-        movie_size = sum(movie_word_counts.values())
-        
-        # Calculate Log-Likelihood for each word
-        movie_ll_values[movie_id] = {}
-        
-        # Track max LL value for normalization
-        max_ll = 0
-        
-        for word, count in movie_word_counts.items():
-            try:
-                # Observed frequencies with smoothing
-                a = count + alpha  # Occurrences in this movie
-                b = (corpus_word_counts[word] - count) + alpha  # Occurrences in other movies
-                c = movie_size + (alpha * len(movie_word_counts))  # Total words in this movie
-                d = (total_corpus_size - movie_size) + (alpha * len(corpus_word_counts))  # Total words in other movies
-                
-                # Expected counts based on corpus distribution
-                e1 = c * (a + b) / (c + d)
-                e2 = d * (a + b) / (c + d)
-                
-                # Log-Likelihood calculation
-                ll_parts = []
-                if a > 0 and e1 > 0:
-                    ll_parts.append(a * math.log(a / e1))
-                if b > 0 and e2 > 0:
-                    ll_parts.append(b * math.log(b / e2))
-                
-                ll = 2 * sum(ll_parts)
-                
-                # Apply importance scaling: penalize extremely common words
-                word_rarity = 1.0 - (corpus_word_counts[word] / total_corpus_size)
-                ll = ll * (0.5 + 0.5 * word_rarity)
-                
-                movie_ll_values[movie_id][word] = ll
-                max_ll = max(max_ll, ll)
-            except Exception as e:
-                # Skip words with calculation errors
-                print(f"Error calculating LL for word '{word}' in movie {movie_id}: {e}")
-                continue
-        
-        # Normalize LL values by the maximum value to ensure consistency across movies
-        if max_ll > 0:
-            for word in movie_ll_values[movie_id]:
-                movie_ll_values[movie_id][word] = movie_ll_values[movie_id][word] / max_ll
-        
-        # Log progress
-        if (i+1) % 1000 == 0 or (i+1) == total_movies:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_movies} movies ({(i+1)/total_movies*100:.1f}%) - Elapsed: {elapsed:.2f}s")
-    
-    return movie_ll_values
+
 # Calculate Log-Likelihood if movie features are available
 if 'movie_features' in data and 'corpus_word_counts' in data:
-    movie_ll_values = calculate_log_likelihood(data['movie_features'], data['corpus_word_counts'])
+    movie_ll_values = calculate_log_likelihood(data['movie_features'], data['corpus_word_counts'], batch_size=100)
     data['movie_ll_values'] = movie_ll_values
     
     # Save Log-Likelihood values
@@ -319,24 +289,38 @@ if 'movie_features' in data and 'corpus_word_counts' in data:
     
     print(f"Average number of words with LL > 10 per movie: {np.mean(high_ll_counts):.2f}")
     print(f"Min: {min(high_ll_counts)}, Max: {max(high_ll_counts)}")
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 4: WORD2VEC MODEL TRAINING")
 print("="*80)
 
-def train_word2vec(movie_features, vector_size=100):
-    """Train Word2Vec model on movie tokens"""
+def train_word2vec(movie_features, vector_size=100, batch_size=1000):
+    """Train Word2Vec model on movie tokens with memory optimization"""
     print(f"Training Word2Vec model with {vector_size} dimensions...")
     start_time = time.time()
     
-    # Extract token lists from movie features
-    tokenized_corpus = list(movie_features['tokens'])
+    # Extract token lists from movie features in batches
+    tokenized_corpus = []
+    total_movies = len(movie_features)
+    
+    for i in range(0, total_movies, batch_size):
+        batch_end = min(i + batch_size, total_movies)
+        batch = movie_features.iloc[i:batch_end]
+        
+        batch_tokens = list(batch['tokens'])
+        tokenized_corpus.extend(batch_tokens)
+        
+        # Log progress
+        print(f"Loaded tokens from {batch_end}/{total_movies} movies ({batch_end/total_movies*100:.1f}%)")
     
     # Print corpus statistics
     total_tokens = sum(len(tokens) for tokens in tokenized_corpus)
     print(f"Training corpus size: {total_tokens} tokens from {len(tokenized_corpus)} documents")
     
-    # Train Word2Vec model using CBOW approach
+    # Train Word2Vec model using CBOW approach with memory optimization
     print("Starting Word2Vec training (this may take a few minutes)...")
     word2vec_model = Word2Vec(
         sentences=tokenized_corpus,
@@ -344,9 +328,13 @@ def train_word2vec(movie_features, vector_size=100):
         window=5,
         min_count=5,
         workers=4,
-        epochs=50,
+        epochs=30,  # Reduced from 50 to save memory
         sg=0  # CBOW model
     )
+    
+    # Free memory - no longer need the full corpus
+    del tokenized_corpus
+    gc.collect()
     
     elapsed = time.time() - start_time
     print(f"Word2Vec training completed in {elapsed:.2f} seconds")
@@ -354,11 +342,10 @@ def train_word2vec(movie_features, vector_size=100):
     # Print model statistics
     vocab_size = len(word2vec_model.wv)
     print(f"Word2Vec model vocabulary size: {vocab_size} words")
-    print(f"Words not included in model due to min_count filter: {len(corpus_word_counts) - vocab_size}")
     
     # Show some example vectors for common words
     print("\nExample word vectors from the trained model:")
-    common_words = [word for word, _ in corpus_word_counts.most_common(10)]
+    common_words = [word for word, _ in data['corpus_word_counts'].most_common(10)]
     for word in common_words:
         if word in word2vec_model.wv:
             # Show just the first 5 dimensions of the vector
@@ -388,14 +375,17 @@ if 'movie_features' in data:
     word2vec_model.save(word2vec_path)
     
     print(f"Trained and saved Word2Vec model with {len(word2vec_model.wv)} words")
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 5: MOVIE VECTOR GENERATION")
 print("="*80)
 
-def generate_movie_vectors(movie_ll_values, word2vec_model, movie_features):
-    """Generate movie feature vectors using Log-Likelihood and Word2Vec"""
-    print("Generating movie feature vectors using Log-Likelihood + Word2Vec...")
+def generate_movie_vectors(movie_ll_values, word2vec_model, movie_features, batch_size=100):
+    """Generate movie feature vectors using Log-Likelihood and Word2Vec in batches"""
+    print("Generating movie feature vectors using Log-Likelihood + Word2Vec in batches...")
     start_time = time.time()
     
     movie_vectors = {}
@@ -403,49 +393,62 @@ def generate_movie_vectors(movie_ll_values, word2vec_model, movie_features):
     no_words_found = 0
     low_ll_sum = 0
     
-    total_movies = len(movie_ll_values)
-    print(f"Processing {total_movies} movies...")
+    # Get movie IDs from LL values
+    movie_ids = list(movie_ll_values.keys())
+    total_movies = len(movie_ids)
     
-    for i, (movie_id, ll_values) in enumerate(movie_ll_values.items()):
-        # Sort words by LL value and select top 200
-        top_words = sorted(ll_values.items(), key=lambda x: x[1], reverse=True)[:200]
+    # Process movies in batches
+    for batch_start in range(0, total_movies, batch_size):
+        batch_end = min(batch_start + batch_size, total_movies)
+        batch_movie_ids = movie_ids[batch_start:batch_end]
         
-        if not top_words:
-            no_words_found += 1
-            continue
+        print(f"Processing batch {batch_start//batch_size + 1}: movies {batch_start+1}-{batch_end} of {total_movies}")
         
-        # Combine Word2Vec vectors weighted by Log-Likelihood values
-        weighted_vectors = []
-        ll_sum = 0
-        words_used = 0
-        
-        for word, ll_value in top_words:
-            if ll_value <= 0:
+        for movie_id in batch_movie_ids:
+            # Sort words by LL value and select top 200
+            ll_values = movie_ll_values[movie_id]
+            top_words = sorted(ll_values.items(), key=lambda x: x[1], reverse=True)[:200]
+            
+            if not top_words:
+                no_words_found += 1
                 continue
             
-            if word in word2vec_model.wv:
-                weighted_vectors.append(word2vec_model.wv[word] * ll_value)
-                ll_sum += ll_value
-                words_used += 1
-        
-        if weighted_vectors and ll_sum > 0:
-            # Calculate the weighted average vector
-            movie_vector = np.sum(weighted_vectors, axis=0) / ll_sum
+            # Combine Word2Vec vectors weighted by Log-Likelihood values
+            weighted_vectors = []
+            ll_sum = 0
+            words_used = 0
             
-            # Normalize to unit length
-            norm = np.linalg.norm(movie_vector)
-            if norm > 0:
-                movie_vector = movie_vector / norm
-                movie_vectors[movie_id] = movie_vector
-                successful_vectors += 1
-        else:
-            low_ll_sum += 1
+            for word, ll_value in top_words:
+                if ll_value <= 0:
+                    continue
+                
+                if word in word2vec_model.wv:
+                    weighted_vectors.append(word2vec_model.wv[word] * ll_value)
+                    ll_sum += ll_value
+                    words_used += 1
+            
+            if weighted_vectors and ll_sum > 0:
+                # Calculate the weighted average vector
+                movie_vector = np.sum(weighted_vectors, axis=0) / ll_sum
+                
+                # Normalize to unit length
+                norm = np.linalg.norm(movie_vector)
+                if norm > 0:
+                    movie_vector = movie_vector / norm
+                    movie_vectors[movie_id] = movie_vector
+                    successful_vectors += 1
+            else:
+                low_ll_sum += 1
         
-        # Log progress
-        if (i+1) % 1000 == 0 or (i+1) == total_movies:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_movies} movies ({(i+1)/total_movies*100:.1f}%) - Elapsed: {elapsed:.2f}s")
-            print(f"Successfully created vectors: {successful_vectors}")
+        # Log progress and elapsed time
+        elapsed = time.time() - start_time
+        progress = batch_end / total_movies * 100
+        remaining = elapsed / (batch_end - batch_start) * (total_movies - batch_end) if batch_end < total_movies else 0
+        print(f"Progress: {progress:.1f}% - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        print(f"Successfully created vectors: {successful_vectors}/{batch_end}")
+        
+        # Force garbage collection after each batch
+        gc.collect()
     
     print(f"\nVector generation complete:")
     print(f"Successfully created vectors: {successful_vectors}/{total_movies} ({successful_vectors/total_movies*100:.1f}%)")
@@ -471,7 +474,8 @@ if 'word2vec_model' in data and 'movie_ll_values' in data:
     movie_vectors = generate_movie_vectors(
         data['movie_ll_values'], 
         data['word2vec_model'],
-        data['movie_features']
+        data['movie_features'],
+        batch_size=100
     )
     data['movie_vectors'] = movie_vectors
     
@@ -494,14 +498,17 @@ if 'word2vec_model' in data and 'movie_ll_values' in data:
     print(f"\nVector statistics:")
     print(f"Average vector norm: {np.mean(vector_norms):.4f}")
     print(f"Vector dimensionality: {word2vec_dim}")
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 6: USER VECTOR GENERATION")
 print("="*80)
 
-def generate_user_vectors(movie_vectors, train_ratings):
-    """Generate user feature vectors based on rated movies and their content"""
-    print("Generating user feature vectors based on movie ratings...")
+def generate_user_vectors(movie_vectors, train_ratings, batch_size=100):
+    """Generate user feature vectors based on rated movies and their content in batches"""
+    print("Generating user feature vectors based on movie ratings in batches...")
     start_time = time.time()
     
     user_vectors = {}
@@ -510,66 +517,84 @@ def generate_user_vectors(movie_vectors, train_ratings):
     no_vectors_for_movies = 0
     low_weight_sum = 0
     
-    # Process each user
-    user_ids = train_ratings['userId'].unique()
-    total_users = len(user_ids)
-    print(f"Processing {total_users} users...")
+    # Create a rating cache for quick lookups
+    # This can be memory intensive for large datasets, but speeds up processing
+    user_ratings_dict = {}
+    print("Creating user ratings lookup dictionary...")
     
-    for i, user_id in enumerate(user_ids):
-        # Get user ratings
-        user_data = train_ratings[train_ratings['userId'] == user_id]
+    # Process in chunks to avoid memory issues
+    for _, row in train_ratings.iterrows():
+        user_id = row['userId']
+        movie_id = row['movieId']
+        rating = row['rating']
         
-        if len(user_data) == 0:
-            no_ratings_found += 1
-            continue
+        if user_id not in user_ratings_dict:
+            user_ratings_dict[user_id] = {}
         
-        weighted_vectors = []
-        weight_sum = 0
-        movies_with_vectors = 0
-        movies_without_vectors = 0
+        user_ratings_dict[user_id][movie_id] = rating
+    
+    # Process each user
+    user_ids = list(user_ratings_dict.keys())
+    total_users = len(user_ids)
+    print(f"Processing {total_users} users in batches...")
+    
+    # Process users in batches
+    for batch_start in range(0, total_users, batch_size):
+        batch_end = min(batch_start + batch_size, total_users)
+        batch_user_ids = user_ids[batch_start:batch_end]
         
-        for _, rating_row in user_data.iterrows():
-            movie_id = rating_row['movieId']
+        print(f"Processing batch {batch_start//batch_size + 1}: users {batch_start+1}-{batch_end} of {total_users}")
+        
+        for user_id in batch_user_ids:
+            # Get user ratings
+            user_ratings = user_ratings_dict[user_id]
             
-            # Use the normalized rating if available, otherwise use original rating
-            if 'normalized_rating' in rating_row:
-                rating = rating_row['normalized_rating']
-                # Convert from [0,1] to [-0.5,0.5] to match the paper's approach
-                weight = rating - 0.5
-            else:
-                rating = rating_row['rating']
+            if len(user_ratings) == 0:
+                no_ratings_found += 1
+                continue
+            
+            weighted_vectors = []
+            weight_sum = 0
+            movies_with_vectors = 0
+            movies_without_vectors = 0
+            
+            for movie_id, rating in user_ratings.items():
                 # Center rating at 3.0 as described in the papers
                 weight = rating - 3.0
+                
+                # Skip if movie vector is not available
+                if movie_id not in movie_vectors:
+                    movies_without_vectors += 1
+                    continue
+                else:
+                    movies_with_vectors += 1
+                
+                if weight != 0:
+                    weighted_vectors.append(movie_vectors[movie_id] * weight)
+                    weight_sum += abs(weight)
             
-            # Skip if movie vector is not available
-            if movie_id not in movie_vectors:
-                movies_without_vectors += 1
-                continue
+            if weighted_vectors and weight_sum > 0:
+                # Calculate the weighted average vector
+                user_vector = np.sum(weighted_vectors, axis=0) / weight_sum
+                
+                # Normalize to unit length
+                norm = np.linalg.norm(user_vector)
+                if norm > 0:
+                    user_vector = user_vector / norm
+                    user_vectors[user_id] = user_vector
+                    successful_vectors += 1
             else:
-                movies_with_vectors += 1
-            
-            if weight != 0:
-                weighted_vectors.append(movie_vectors[movie_id] * weight)
-                weight_sum += abs(weight)
-        
-        if weighted_vectors and weight_sum > 0:
-            # Calculate the weighted average vector
-            user_vector = np.sum(weighted_vectors, axis=0) / weight_sum
-            
-            # Normalize to unit length
-            norm = np.linalg.norm(user_vector)
-            if norm > 0:
-                user_vector = user_vector / norm
-                user_vectors[user_id] = user_vector
-                successful_vectors += 1
-        else:
-            low_weight_sum += 1
+                low_weight_sum += 1
         
         # Log progress
-        if (i+1) % 1000 == 0 or (i+1) == total_users:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_users} users ({(i+1)/total_users*100:.1f}%) - Elapsed: {elapsed:.2f}s")
-            print(f"Successfully created vectors: {successful_vectors}")
+        elapsed = time.time() - start_time
+        progress = batch_end / total_users * 100
+        remaining = elapsed / (batch_end - batch_start) * (total_users - batch_end) if batch_end < total_users else 0
+        print(f"Progress: {progress:.1f}% - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        print(f"Successfully created vectors: {successful_vectors}")
+        
+        # Force garbage collection after each batch
+        gc.collect()
     
     print(f"\nUser vector generation complete:")
     print(f"Successfully created vectors: {successful_vectors}/{total_users} ({successful_vectors/total_users*100:.1f}%)")
@@ -577,14 +602,18 @@ def generate_user_vectors(movie_vectors, train_ratings):
     print(f"Users with no vectorized movies: {no_vectors_for_movies}")
     print(f"Users with too low weight sum: {low_weight_sum}")
     
+    # Free memory
+    del user_ratings_dict
+    gc.collect()
+    
     # Display sample user vectors
     if user_vectors:
         print("\nSample user vectors:")
         for user_id in list(user_vectors.keys())[:3]:
             vector = user_vectors[user_id]
-            user_data = train_ratings[train_ratings['userId'] == user_id]
+            user_rating_count = len([r for r in train_ratings[train_ratings['userId'] == user_id]])
             print(f"User ID: {user_id}")
-            print(f"Number of ratings: {len(user_data)}")
+            print(f"Number of ratings: {user_rating_count}")
             print(f"Vector shape: {vector.shape}")
             print(f"Vector norm: {np.linalg.norm(vector):.4f}")
             print(f"First 5 dimensions: {vector[:5]}")
@@ -594,7 +623,7 @@ def generate_user_vectors(movie_vectors, train_ratings):
 
 # Generate user vectors if movie vectors and training ratings are available
 if 'movie_vectors' in data and 'train_ratings' in data:
-    user_vectors = generate_user_vectors(data['movie_vectors'], data['train_ratings'])
+    user_vectors = generate_user_vectors(data['movie_vectors'], data['train_ratings'], batch_size=100)
     data['user_vectors'] = user_vectors
     
     # Save user vectors
@@ -616,59 +645,87 @@ if 'movie_vectors' in data and 'train_ratings' in data:
     print(f"\nVector statistics:")
     print(f"Average vector norm: {np.mean(vector_norms):.4f}")
     print(f"Vector dimensionality: {word2vec_dim}")
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 7: USER-MOVIE SIMILARITY CALCULATION")
 print("="*80)
 
-def calculate_user_movie_similarity(user_vectors, movie_vectors, threshold=0.3):
-    """Calculate similarity between users and movies"""
-    print(f"Calculating user-movie similarity with threshold {threshold}...")
+def calculate_user_movie_similarity(user_vectors, movie_vectors, threshold=0.3, batch_size=50):
+    """Calculate similarity between users and movies in batches"""
+    print(f"Calculating user-movie similarity with threshold {threshold} in batches...")
     start_time = time.time()
     
     # Store similarities in a dictionary of dictionaries
     # {user_id: {movie_id: similarity_score}}
     user_movie_similarities = {}
     
-    # Calculate similarity for each user
-    total_users = len(user_vectors)
-    total_similarities = 0
-    similarities_above_threshold = 0
+    # Get all user IDs
+    user_ids = list(user_vectors.keys())
+    total_users = len(user_ids)
+    total_movies = len(movie_vectors)
     
-    for i, (user_id, user_vector) in enumerate(user_vectors.items()):
-        user_sims = {}
-        user_similarities = 0
-        user_above_threshold = 0
+    # Process users in batches
+    for batch_start in range(0, total_users, batch_size):
+        batch_end = min(batch_start + batch_size, total_users)
+        batch_user_ids = user_ids[batch_start:batch_end]
         
-        for movie_id, movie_vector in movie_vectors.items():
-            # Calculate cosine similarity
-            similarity = np.dot(user_vector, movie_vector)
-            user_similarities += 1
+        print(f"Processing batch {batch_start//batch_size + 1}: users {batch_start+1}-{batch_end} of {total_users}")
+        
+        for user_id in batch_user_ids:
+            user_vector = user_vectors[user_id]
+            user_sims = {}
+            user_similarities = 0
+            user_above_threshold = 0
             
-            # Only store if above threshold
-            if similarity > threshold:
-                user_sims[movie_id] = similarity
-                user_above_threshold += 1
+            # Calculate similarity for all movies at once (vectorized)
+            # Convert both user and movie vectors to arrays for faster computation
+            user_vector_array = np.array(user_vector).reshape(1, -1)
+            
+            # Process movies in chunks to avoid memory issues
+            movie_ids = list(movie_vectors.keys())
+            movie_chunk_size = 1000  # Adjust based on memory availability
+            
+            for movie_chunk_start in range(0, len(movie_ids), movie_chunk_size):
+                movie_chunk_end = min(movie_chunk_start + movie_chunk_size, len(movie_ids))
+                chunk_movie_ids = movie_ids[movie_chunk_start:movie_chunk_end]
+                
+                # Create array of movie vectors for this chunk
+                movie_vectors_array = np.array([movie_vectors[mid] for mid in chunk_movie_ids])
+                
+                # Calculate cosine similarity in a vectorized way
+                similarities = np.dot(user_vector_array, movie_vectors_array.T)[0]
+                
+                # Filter by threshold and store
+                for i, sim in enumerate(similarities):
+                    if sim > threshold:
+                        movie_id = chunk_movie_ids[i]
+                        user_sims[movie_id] = float(sim)  # Convert to native Python float
+                        user_above_threshold += 1
+                    user_similarities += 1
+            
+            user_movie_similarities[user_id] = user_sims
+            
+            # Log progress for this user
+            if len(batch_user_ids) <= 10 or (user_id == batch_user_ids[-1]):
+                print(f"User {user_id}: {user_above_threshold}/{total_movies} movies above threshold ({user_above_threshold/total_movies*100:.2f}%)")
         
-        user_movie_similarities[user_id] = user_sims
-        total_similarities += user_similarities
-        similarities_above_threshold += user_above_threshold
+        # Log progress for this batch
+        elapsed = time.time() - start_time
+        progress = batch_end / total_users * 100
+        remaining = (elapsed / (batch_end - batch_start)) * (total_users - batch_end) if batch_end < total_users else 0
+        print(f"Processed {batch_end}/{total_users} users ({progress:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
         
-        # Log progress
-        if (i+1) % 100 == 0 or (i+1) == total_users:
-            elapsed = time.time() - start_time
-            remaining = (elapsed / (i+1)) * (total_users - (i+1)) if i < total_users - 1 else 0
-            print(f"Processed {i+1}/{total_users} users ({(i+1)/total_users*100:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
-            print(f"User {user_id}: {user_above_threshold}/{len(movie_vectors)} movies above threshold ({user_above_threshold/len(movie_vectors)*100:.2f}%)")
+        # Force garbage collection after each batch
+        gc.collect()
     
-    avg_above_threshold = similarities_above_threshold / total_users if total_users > 0 else 0
-    threshold_percentage = similarities_above_threshold / total_similarities * 100 if total_similarities > 0 else 0
+    avg_above_threshold = sum(len(sims) for sims in user_movie_similarities.values()) / len(user_movie_similarities) if user_movie_similarities else 0
     
     print(f"\nSimilarity calculation complete:")
-    print(f"Total users processed: {total_users}")
-    print(f"Total movies per user: {len(movie_vectors)}")
-    print(f"Total similarity calculations: {total_similarities}")
-    print(f"Similarities above threshold: {similarities_above_threshold} ({threshold_percentage:.2f}%)")
+    print(f"Total users processed: {len(user_movie_similarities)}")
+    print(f"Total movies per user: {total_movies}")
     print(f"Average movies above threshold per user: {avg_above_threshold:.2f}")
     
     # Display sample user similarities
@@ -682,18 +739,18 @@ def calculate_user_movie_similarity(user_vectors, movie_vectors, threshold=0.3):
                 top_movies = sorted(sims.items(), key=lambda x: x[1], reverse=True)[:5]
                 print("Top 5 most similar movies:")
                 for movie_id, sim in top_movies:
-                    movie_title = data['movie_features'][data['movie_features']['movieId'] == movie_id]['title'].values[0]
+                    movie_title = data['movie_features'][data['movie_features']['movieId'] == movie_id]['title'].values[0] if 'movie_features' in data else f"Movie {movie_id}"
                     print(f"  '{movie_title}' (ID: {movie_id}): {sim:.4f}")
             print("---")
     
     return user_movie_similarities
-
 # Calculate similarities if user and movie vectors are available
 if 'user_vectors' in data and 'movie_vectors' in data:
     user_movie_similarities = calculate_user_movie_similarity(
         data['user_vectors'], 
         data['movie_vectors'], 
-        threshold=similarity_threshold
+        threshold=similarity_threshold,
+        batch_size=50
     )
     data['user_movie_similarities'] = user_movie_similarities
     
@@ -708,20 +765,37 @@ if 'user_vectors' in data and 'movie_vectors' in data:
     print(f"\nSimilarity statistics:")
     print(f"Average number of similar movies per user: {np.mean(similarity_counts):.2f}")
     print(f"Min: {min(similarity_counts)}, Max: {max(similarity_counts)}")
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 8: RECOMMENDATION GENERATION")
 print("="*80)
 
-def get_user_rated_movies(user_id, train_ratings):
-    """Get the set of movies already rated by a user"""
+def get_user_rated_movies(user_id, train_ratings, cached_rated_movies=None):
+    """Get the set of movies already rated by a user with caching for efficiency"""
+    # Initialize cache if not provided
+    if cached_rated_movies is None:
+        cached_rated_movies = {}
+        
+    # Return from cache if available
+    if user_id in cached_rated_movies:
+        return cached_rated_movies[user_id]
+    
+    # Get from ratings dataframe
     if train_ratings is None:
         return set()
     
     user_data = train_ratings[train_ratings['userId'] == user_id]
-    return set(user_data['movieId'].values)
+    rated_movies = set(user_data['movieId'].values)
+    
+    # Cache for future use
+    cached_rated_movies[user_id] = rated_movies
+    
+    return rated_movies
 
-def get_top_n_recommendations(user_id, user_movie_similarities, train_ratings, n=10):
+def get_top_n_recommendations(user_id, user_movie_similarities, train_ratings, cached_rated_movies=None, n=10):
     """
     Generate top-N recommendations for a specific user
     
@@ -733,6 +807,8 @@ def get_top_n_recommendations(user_id, user_movie_similarities, train_ratings, n
         Dictionary of user-movie similarities
     train_ratings : pd.DataFrame
         DataFrame of user ratings
+    cached_rated_movies : dict, optional
+        Cache of user rated movies for efficiency
     n : int, optional
         Number of recommendations to generate
         
@@ -744,8 +820,8 @@ def get_top_n_recommendations(user_id, user_movie_similarities, train_ratings, n
     if user_id not in user_movie_similarities:
         return []
     
-    # Get movies already rated by the user
-    rated_movies = get_user_rated_movies(user_id, train_ratings)
+    # Get movies already rated by the user (using cache)
+    rated_movies = get_user_rated_movies(user_id, train_ratings, cached_rated_movies)
     
     # Get user's similarities
     user_sims = user_movie_similarities[user_id]
@@ -799,10 +875,13 @@ def predict_rating(user_id, movie_id, user_movie_similarities, train_ratings):
     
     return predicted_rating
 
-def generate_recommendations_for_all_users(user_movie_similarities, train_ratings, movie_features, n=10):
-    """Generate recommendations for all users"""
-    print(f"Generating top-{n} recommendations for all users...")
+def generate_recommendations_for_all_users(user_movie_similarities, train_ratings, movie_features, n=10, batch_size=100):
+    """Generate recommendations for all users with memory efficiency in mind"""
+    print(f"Generating top-{n} recommendations for all users in batches...")
     start_time = time.time()
+    
+    # Create a shared cache for rated movies
+    cached_rated_movies = {}
     
     # Get all user IDs
     user_ids = list(user_movie_similarities.keys())
@@ -810,30 +889,49 @@ def generate_recommendations_for_all_users(user_movie_similarities, train_rating
     
     all_recommendations = {}
     users_with_recommendations = 0
-    total_recommendations = 0
     
-    print(f"Processing {total_users} users...")
-    
-    for i, user_id in enumerate(user_ids):
-        recommendations = get_top_n_recommendations(user_id, user_movie_similarities, train_ratings, n)
+    # Process users in batches
+    for batch_start in range(0, total_users, batch_size):
+        batch_end = min(batch_start + batch_size, total_users)
+        batch_user_ids = user_ids[batch_start:batch_end]
         
-        if recommendations:
-            all_recommendations[user_id] = recommendations
-            users_with_recommendations += 1
-            total_recommendations += len(recommendations)
+        print(f"Processing batch {batch_start//batch_size + 1}: users {batch_start+1}-{batch_end} of {total_users}")
+        batch_start_time = time.time()
         
-        # Log progress
-        if (i+1) % 1000 == 0 or (i+1) == total_users:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_users} users ({(i+1)/total_users*100:.1f}%) - Elapsed: {elapsed:.2f}s")
-            print(f"Users with recommendations: {users_with_recommendations}")
+        for user_id in batch_user_ids:
+            recommendations = get_top_n_recommendations(
+                user_id, 
+                user_movie_similarities, 
+                train_ratings, 
+                cached_rated_movies,
+                n
+            )
+            
+            if recommendations:
+                all_recommendations[user_id] = recommendations
+                users_with_recommendations += 1
+        
+        # Log progress after each batch
+        batch_time = time.time() - batch_start_time
+        elapsed = time.time() - start_time
+        progress = batch_end / total_users * 100
+        remaining = batch_time * ((total_users - batch_end) / len(batch_user_ids)) if batch_end < total_users else 0
+        
+        print(f"Processed {batch_end}/{total_users} users ({progress:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        print(f"Users with recommendations so far: {users_with_recommendations}")
+        
+        # Force garbage collection after each batch
+        gc.collect()
     
-    avg_recommendations = total_recommendations / users_with_recommendations if users_with_recommendations > 0 else 0
-    
-    print(f"\nRecommendation generation complete:")
-    print(f"Users with recommendations: {users_with_recommendations}/{total_users} ({users_with_recommendations/total_users*100:.1f}%)")
-    print(f"Total recommendations generated: {total_recommendations}")
-    print(f"Average recommendations per user: {avg_recommendations:.2f}")
+    # Calculate statistics
+    if all_recommendations:
+        total_recommendations = sum(len(recs) for recs in all_recommendations.values())
+        avg_recommendations = total_recommendations / users_with_recommendations if users_with_recommendations > 0 else 0
+        
+        print(f"\nRecommendation generation complete:")
+        print(f"Users with recommendations: {users_with_recommendations}/{total_users} ({users_with_recommendations/total_users*100:.1f}%)")
+        print(f"Total recommendations generated: {total_recommendations}")
+        print(f"Average recommendations per user: {avg_recommendations:.2f}")
     
     # Display sample recommendations for a few users
     if all_recommendations:
@@ -859,7 +957,8 @@ if 'user_movie_similarities' in data and 'train_ratings' in data:
         data['user_movie_similarities'], 
         data['train_ratings'],
         data['movie_features'],
-        n=top_n
+        n=top_n,
+        batch_size=100
     )
     data['all_recommendations'] = all_recommendations
     
@@ -870,75 +969,69 @@ if 'user_movie_similarities' in data and 'train_ratings' in data:
     # Also save in a more readable CSV format
     recommendations_list = []
     
-    for user_id, recs in all_recommendations.items():
-        for rank, (movie_id, score) in enumerate(recs, 1):
-            movie_title = "Unknown"
-            if 'movie_features' in data:
-                movie_row = data['movie_features'][data['movie_features']['movieId'] == movie_id]
-                if not movie_row.empty and 'title' in movie_row.columns:
-                    movie_title = movie_row.iloc[0]['title']
-                    
-            recommendations_list.append({
-                'userId': user_id,
-                'movieId': movie_id,
-                'title': movie_title,
-                'rank': rank,
-                'similarity_score': score
-            })
+    # Process in chunks to avoid memory issues
+    chunk_size = 1000
+    user_ids = list(all_recommendations.keys())
+    total_users = len(user_ids)
+    
+    for chunk_start in range(0, total_users, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total_users)
+        user_chunk = user_ids[chunk_start:chunk_end]
+        
+        chunk_recommendations = []
+        for user_id in user_chunk:
+            for rank, (movie_id, score) in enumerate(all_recommendations[user_id], 1):
+                movie_title = "Unknown"
+                if 'movie_features' in data:
+                    movie_row = data['movie_features'][data['movie_features']['movieId'] == movie_id]
+                    if not movie_row.empty and 'title' in movie_row.columns:
+                        movie_title = movie_row.iloc[0]['title']
+                        
+                chunk_recommendations.append({
+                    'userId': user_id,
+                    'movieId': movie_id,
+                    'title': movie_title,
+                    'rank': rank,
+                    'similarity_score': score
+                })
+        
+        recommendations_list.extend(chunk_recommendations)
+        print(f"Processed recommendation chunk {chunk_start//chunk_size + 1}: users {chunk_start+1}-{chunk_end} of {total_users}")
+        gc.collect()
     
     if recommendations_list:
-        recommendations_df = pd.DataFrame(recommendations_list)
-        recommendations_df.to_csv(os.path.join(output_path, 'content_based_recommendations.csv'), index=False)
-        print(f"Saved recommendations to CSV file with {len(recommendations_df)} entries")
-
-# This section replaces the evaluation section in stage2_content.py
+        # Write CSV in chunks to avoid memory issues
+        chunk_size = 10000
+        total_recs = len(recommendations_list)
+        
+        for chunk_start in range(0, total_recs, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_recs)
+            chunk = recommendations_list[chunk_start:chunk_end]
+            
+            chunk_df = pd.DataFrame(chunk)
+            
+            # For first chunk, write with header
+            if chunk_start == 0:
+                chunk_df.to_csv(os.path.join(output_path, 'content_based_recommendations.csv'), index=False, mode='w')
+            else:
+                # For subsequent chunks, append without header
+                chunk_df.to_csv(os.path.join(output_path, 'content_based_recommendations.csv'), index=False, mode='a', header=False)
+            
+            print(f"Saved recommendation chunk {chunk_start//chunk_size + 1}: recommendations {chunk_start+1}-{chunk_end} of {total_recs}")
+            
+        print(f"Saved recommendations to CSV file with {total_recs} entries")
+    
+    # Free memory
+    del recommendations_list
+    gc.collect()
 
 print("\n" + "="*80)
 print("STEP 9: MODEL EVALUATION")
 print("="*80)
 
-def predict_rating(user_id, movie_id, user_movie_similarities, train_ratings):
+def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings, batch_size=100):
     """
-    Predict a user's rating for a movie
-    
-    Parameters:
-    -----------
-    user_id : int
-        The user ID
-    movie_id : int
-        The movie ID
-    user_movie_similarities : dict
-        Dictionary of user-movie similarities
-    train_ratings : pd.DataFrame
-        DataFrame of user ratings
-        
-    Returns:
-    --------
-    float
-        Predicted rating (0.5-5.0 scale)
-    """
-    # If user not in similarity matrix, return average rating
-    if user_id not in user_movie_similarities:
-        return 3.0
-    
-    # Get user's average rating from training data
-    user_train = train_ratings[train_ratings['userId'] == user_id]
-    user_avg_rating = user_train['rating'].mean() if len(user_train) > 0 else 3.0
-    
-    # If movie not in similarity matrix, return user's average rating
-    if movie_id not in user_movie_similarities[user_id]:
-        return user_avg_rating
-    
-    # Convert similarity score to rating prediction
-    # Similarity is in range [0,1], convert to rating range [0.5,5]
-    sim_score = user_movie_similarities[user_id][movie_id]
-    predicted_rating = 0.5 + 4.5 * sim_score
-    
-    return predicted_rating
-
-def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings):
-    """
-    Evaluate the recommendations using RMSE and MAE
+    Evaluate the recommendations using RMSE and MAE with batching for memory efficiency
     
     Parameters:
     -----------
@@ -948,148 +1041,136 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings)
         DataFrame of training ratings
     test_ratings : pd.DataFrame
         DataFrame of test ratings
+    batch_size : int
+        Size of user batches to process
         
     Returns:
     --------
     dict
         Dictionary of evaluation metrics
-    dict
-        Dictionary of per-user metrics
     """
-    print("Evaluating recommendation model using RMSE and MAE...")
+    print("Evaluating recommendation model using RMSE and MAE with batching...")
     start_time = time.time()
-    
-    # Initialize metrics
-    all_predictions = []
-    all_true_ratings = []
-    
-    # Get all users in test set
-    test_users = test_ratings['userId'].unique()
-    total_test_users = len(test_users)
-    
-    print(f"Evaluating predictions for {total_test_users} users in the test set...")
     
     # Users with similarity data
     users_with_similarity = set(user_movie_similarities.keys())
+    test_users = test_ratings['userId'].unique()
     users_in_test_with_similarity = set(test_users).intersection(users_with_similarity)
     
-    print(f"Users in test set with similarity data: {len(users_in_test_with_similarity)}/{total_test_users} ({len(users_in_test_with_similarity)/total_test_users*100:.1f}%)")
+    print(f"Users in test set with similarity data: {len(users_in_test_with_similarity)}/{len(test_users)} ({len(users_in_test_with_similarity)/len(test_users)*100:.1f}%)")
     
-    # Track individual user metrics
-    user_metrics = {}
+    # Track metrics in chunks instead of storing all predictions
+    squared_errors_sum = 0
+    absolute_errors_sum = 0
+    total_predictions = 0
     users_evaluated = 0
     
-    for i, user_id in enumerate(test_users):
-        # Skip users without similarity data
-        if user_id not in user_movie_similarities:
-            continue
+    # Process users in batches
+    user_list = list(users_in_test_with_similarity)
+    for batch_start in range(0, len(user_list), batch_size):
+        batch_end = min(batch_start + batch_size, len(user_list))
+        batch_users = user_list[batch_start:batch_end]
         
-        # Get user test ratings
-        user_test = test_ratings[test_ratings['userId'] == user_id]
+        print(f"Evaluating batch {batch_start//batch_size + 1}: users {batch_start+1}-{batch_end} of {len(user_list)}")
+        batch_start_time = time.time()
         
-        if len(user_test) == 0:
-            continue
+        batch_squared_errors = 0
+        batch_absolute_errors = 0
+        batch_predictions = 0
         
-        # Predict ratings for test items
-        user_predictions = []
-        user_true_ratings = []
-        
-        for _, row in user_test.iterrows():
-            movie_id = row['movieId']
-            true_rating = row['rating']
+        for user_id in batch_users:
+            # Get user test ratings
+            user_test = test_ratings[test_ratings['userId'] == user_id]
             
-            # Use the predict_rating function
-            predicted_rating = predict_rating(user_id, movie_id, user_movie_similarities, train_ratings)
+            if len(user_test) == 0:
+                continue
             
-            user_predictions.append(predicted_rating)
-            user_true_ratings.append(true_rating)
+            # Get user's average rating from training data
+            user_train = train_ratings[train_ratings['userId'] == user_id]
+            user_avg_rating = user_train['rating'].mean() if len(user_train) > 0 else 3.0
+            
+            # Predict ratings for test items
+            for _, row in user_test.iterrows():
+                movie_id = row['movieId']
+                true_rating = row['rating']
+                
+                # Get similarity-based prediction
+                if movie_id in user_movie_similarities.get(user_id, {}):
+                    # Convert similarity score to rating prediction
+                    sim_score = user_movie_similarities[user_id][movie_id]
+                    predicted_rating = 0.5 + 4.5 * sim_score
+                else:
+                    # Use user's average rating as fallback
+                    predicted_rating = user_avg_rating
+                
+                # Calculate error
+                squared_error = (predicted_rating - true_rating) ** 2
+                absolute_error = abs(predicted_rating - true_rating)
+                
+                batch_squared_errors += squared_error
+                batch_absolute_errors += absolute_error
+                batch_predictions += 1
+            
+            users_evaluated += 1
         
-        # Calculate user RMSE and MAE
-        user_rmse = np.sqrt(np.mean(np.square(np.array(user_predictions) - np.array(user_true_ratings))))
-        user_mae = np.mean(np.abs(np.array(user_predictions) - np.array(user_true_ratings)))
-        
-        # Store individual user metrics
-        user_metrics[user_id] = {
-            'rmse': user_rmse,
-            'mae': user_mae,
-            'num_predictions': len(user_predictions)
-        }
-        
-        # Accumulate all predictions for overall metrics
-        all_predictions.extend(user_predictions)
-        all_true_ratings.extend(user_true_ratings)
-        users_evaluated += 1
+        # Accumulate batch metrics
+        squared_errors_sum += batch_squared_errors
+        absolute_errors_sum += batch_absolute_errors
+        total_predictions += batch_predictions
         
         # Log progress
-        if (i+1) % 100 == 0 or (i+1) == total_test_users:
-            elapsed = time.time() - start_time
-            print(f"Processed {i+1}/{total_test_users} users ({(i+1)/total_test_users*100:.1f}%) - Elapsed: {elapsed:.2f}s")
+        batch_time = time.time() - batch_start_time
+        elapsed = time.time() - start_time
+        progress = batch_end / len(user_list) * 100
+        remaining = batch_time * ((len(user_list) - batch_end) / len(batch_users)) if batch_end < len(user_list) else 0
+        
+        # Periodically calculate and log intermediate metrics
+        if batch_predictions > 0:
+            batch_rmse = np.sqrt(batch_squared_errors / batch_predictions)
+            batch_mae = batch_absolute_errors / batch_predictions
+            print(f"Batch metrics - RMSE: {batch_rmse:.4f}, MAE: {batch_mae:.4f}, Predictions: {batch_predictions}")
+        
+        print(f"Processed {batch_end}/{len(user_list)} users ({progress:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        
+        # Force garbage collection after each batch
+        gc.collect()
     
     # Calculate overall RMSE and MAE
-    if len(all_predictions) > 0:
-        overall_rmse = np.sqrt(np.mean(np.square(np.array(all_predictions) - np.array(all_true_ratings))))
-        overall_mae = np.mean(np.abs(np.array(all_predictions) - np.array(all_true_ratings)))
+    if total_predictions > 0:
+        overall_rmse = np.sqrt(squared_errors_sum / total_predictions)
+        overall_mae = absolute_errors_sum / total_predictions
     else:
         overall_rmse = 0.0
         overall_mae = 0.0
     
     print("\nEvaluation results:")
     print(f"Users evaluated: {users_evaluated}")
-    print(f"Total predictions: {len(all_predictions)}")
+    print(f"Total predictions: {total_predictions}")
     print(f"RMSE: {overall_rmse:.4f}")
     print(f"MAE: {overall_mae:.4f}")
     
-    # Analyze metrics by user rating count
-    if 'train_ratings' in data:
-        print("\nMetrics by user rating count:")
-        
-        # Count ratings for each user
-        user_rating_counts = train_ratings.groupby('userId').size()
-        
-        # Define groups
-        groups = [
-            (0, 10, "0-10 ratings"),
-            (10, 50, "10-50 ratings"),
-            (50, 100, "50-100 ratings"),
-            (100, float('inf'), "100+ ratings")
-        ]
-        
-        for min_count, max_count, label in groups:
-            group_users = [
-                user_id for user_id in user_metrics
-                if min_count <= user_rating_counts.get(user_id, 0) < max_count
-            ]
-            
-            if group_users:
-                group_rmse = np.mean([user_metrics[user_id]['rmse'] for user_id in group_users])
-                group_mae = np.mean([user_metrics[user_id]['mae'] for user_id in group_users])
-                group_predictions = sum(user_metrics[user_id]['num_predictions'] for user_id in group_users)
-                
-                print(f"{label}: {len(group_users)} users, {group_predictions} predictions, RMSE={group_rmse:.4f}, MAE={group_mae:.4f}")
-    
-    # Create metrics dictionary with RMSE and MAE (no HR or ARHR)
+    # Create metrics dictionary
     metrics = {
         'rmse': overall_rmse,
         'mae': overall_mae,
         'num_users_evaluated': users_evaluated,
-        'num_predictions': len(all_predictions)
+        'num_predictions': total_predictions
     }
     
-    return metrics, user_metrics
-
+    return metrics
 # Evaluate recommendations if test ratings are available
 if 'user_movie_similarities' in data and 'train_ratings' in data and 'test_ratings' in data:
     # Call the new evaluation function
     print("Running evaluation with RMSE and MAE metrics...")
-    evaluation_metrics, user_metrics = evaluate_with_rmse_mae(
+    evaluation_metrics = evaluate_with_rmse_mae(
         data['user_movie_similarities'],
         data['train_ratings'],
-        data['test_ratings']
+        data['test_ratings'],
+        batch_size=100
     )
     
     # Store the metrics in the data dictionary
     data['evaluation_metrics'] = evaluation_metrics
-    data['user_metrics'] = user_metrics
     
     # Print the metrics to confirm they're stored correctly
     print("\nStored evaluation metrics:")
@@ -1101,14 +1182,16 @@ if 'user_movie_similarities' in data and 'train_ratings' in data and 'test_ratin
     evaluation_results.to_csv(os.path.join(output_path, 'content_based_evaluation.csv'), index=False)
     
     # Also save user metrics
-    user_metrics_df = pd.DataFrame.from_dict(user_metrics, orient='index')
-    user_metrics_df.reset_index(inplace=True)
-    user_metrics_df.rename(columns={'index': 'userId'}, inplace=True)
-    user_metrics_df.to_csv(os.path.join(output_path, 'user_metrics.csv'), index=False)
+    if 'user_metrics' in data:
+        user_metrics_df = pd.DataFrame.from_dict(data['user_metrics'], orient='index')
+        user_metrics_df.reset_index(inplace=True)
+        user_metrics_df.rename(columns={'index': 'userId'}, inplace=True)
+        user_metrics_df.to_csv(os.path.join(output_path, 'user_metrics.csv'), index=False)
     
     print(f"Saved evaluation metrics to CSV files")
-
-# This section replaces the summary section at the end of stage2_content.py
+    
+    # Free memory
+    gc.collect()
 
 print("\n" + "="*80)
 print("SUMMARY OF CONTENT-BASED RECOMMENDATION SYSTEM")
@@ -1153,6 +1236,7 @@ print("- Word2Vec captures semantic relationships between words")
 print("- Handles new movies effectively (cold start for items)")
 print("- Generates personalized recommendations based on content preferences")
 print("- Doesn't require item-item similarity calculations")
+print("- Memory-optimized batch processing prevents RAM overflow during long runs")
 
 # Saved files
 print("\nSaved Files:")
@@ -1160,5 +1244,11 @@ for file in os.listdir(output_path):
     file_path = os.path.join(output_path, file)
     file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
     print(f"- {file} ({file_size:.2f} MB)")
+
+# Memory usage information
+import psutil
+process = psutil.Process(os.getpid())
+memory_usage = process.memory_info().rss / (1024 * 1024)  # MB
+print(f"\nFinal memory usage: {memory_usage:.2f} MB")
 
 print("\nContent-Based Filtering Model Successfully Implemented!")
