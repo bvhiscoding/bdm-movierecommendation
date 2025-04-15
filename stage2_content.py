@@ -43,6 +43,7 @@ nltk.download('wordnet', quiet=True)
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
+
 # Model parameters
 similarity_threshold = 0.3  # Minimum similarity to consider
 word2vec_dim = 100  # Dimensionality of Word2Vec embeddings
