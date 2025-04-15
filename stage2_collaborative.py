@@ -19,8 +19,8 @@ logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 # Set paths
-input_path = "./"  # Current directory where stage1.py saved the files
-output_path = "./collaborative-recommendations"
+input_path = "./processed/"  # Current directory where stage1.py saved the files
+output_path = "./rec/collaborative-recommendations"
 top_n = 50
 
 # Create output directory if it doesn't exist
@@ -48,7 +48,7 @@ def load_data():
     data = {}
     
     # Load movie features
-    movie_features_path = os.path.join(input_path, 'processed/processed_movie_features.csv')
+    movie_features_path = os.path.join(input_path, 'processed_movie_features.csv')
     if os.path.exists(movie_features_path):
         data['movie_features'] = pd.read_csv(movie_features_path)
         logger.info(f"Loaded features for {len(data['movie_features'])} movies")
@@ -57,7 +57,7 @@ def load_data():
         return None
     
     # Load normalized ratings
-    ratings_path = os.path.join(input_path, 'processed/normalized_ratings.csv')
+    ratings_path = os.path.join(input_path, 'normalized_ratings.csv')
     if os.path.exists(ratings_path):
         data['ratings'] = pd.read_csv(ratings_path)
         logger.info(f"Loaded {len(data['ratings'])} normalized ratings")

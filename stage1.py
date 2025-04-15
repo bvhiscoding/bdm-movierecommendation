@@ -32,7 +32,7 @@ print(f"Loaded {len(movies_df)} movies from MovieLens dataset")
 print(movies_df.head(3))
 
 # Load TMDB data (containing movie overviews, cast, director)
-tmdb_df = pd.read_csv('./extracted_data/tmdb.csv')
+tmdb_df = pd.read_csv('./extracted_data/tmdb.csv') 
 print(f"\nLoaded {len(tmdb_df)} movies from TMDB dataset")
 print(tmdb_df.head(3)[['id', 'tmdb_title', 'overview']])
 
@@ -57,11 +57,13 @@ movie_data['text_corpus'] += movie_data['title'].fillna("")
 # Add TMDB overview to corpus
 movie_data['text_corpus'] += " " + movie_data['overview'].fillna("")
 
-# Add TMDB cast to corpus
-movie_data['text_corpus'] += " " + movie_data['cast'].fillna("")
+# # Add TMDB cast to corpus
+# movie_data['text_corpus'] += " " + movie_data['cast'].fillna("")
 
-# Add TMDB director to corpus
-movie_data['text_corpus'] += " " + movie_data['director'].fillna("")
+# # Add TMDB director to corpus
+# movie_data['text_corpus'] += " " + movie_data['director'].fillna("")
+
+# movie_data['text_corpus'] += " " + movie_data['keywords'].fillna("")
 
 # Aggregate tags by movieId
 tags_by_movie = tags_df.groupby('movieId')['tag'].apply(lambda x: ' '.join(x.fillna(''))).reset_index()
@@ -280,37 +282,24 @@ plt.savefig('./processed/user_rating_stats.png')
 print("\nUser rating statistics plot saved as 'user_rating_stats.png'")
 plt.close()
 
-# Normalize ratings using z-score and min-max scaling
 def normalize_ratings(ratings_df):
-    """Chuẩn hóa đánh giá sử dụng Min-Max scaling theo từng người dùng"""
-    # Tạo bản sao để không ảnh hưởng đến dữ liệu gốc
+    """Normalize ratings using Min-Max scaling"""
+    # Create a copy to avoid modifying the original data
     result_df = ratings_df.copy()
     
-    # Tính toán giá trị min và max của từng người dùng
-    user_stats = ratings_df.groupby('userId').agg({
-        'rating': ['min', 'max']
-    }).reset_index()
+    # Group ratings by user for min-max scaling
+    def min_max_scale_user_ratings(user_ratings):
+        # Handle users with only one rating or all identical ratings
+        if len(user_ratings) <= 1 or user_ratings.min() == user_ratings.max():
+            return pd.Series(0.5, index=user_ratings.index)
+        
+        # Perform min-max scaling
+        return (user_ratings - user_ratings.min()) / (user_ratings.max() - user_ratings.min())
     
-    # Flatten column names
-    user_stats.columns = ['userId', 'rating_min', 'rating_max']
+    # Apply min-max scaling to each user's ratings
+    result_df['normalized_rating'] = result_df.groupby('userId')['rating'].transform(min_max_scale_user_ratings)
     
-    # Gộp thống kê người dùng với đánh giá
-    merged_df = pd.merge(result_df, user_stats, on='userId', how='left')
-    
-    # Tính toán normalized rating
-    # Xử lý trường hợp min = max (tất cả đánh giá bằng nhau)
-    mask_diff = (merged_df['rating_max'] - merged_df['rating_min']) > 0
-    
-    # Với người dùng có sự khác biệt trong đánh giá
-    merged_df.loc[mask_diff, 'normalized_rating'] = (
-        (merged_df.loc[mask_diff, 'rating'] - merged_df.loc[mask_diff, 'rating_min']) / 
-        (merged_df.loc[mask_diff, 'rating_max'] - merged_df.loc[mask_diff, 'rating_min'])
-    )
-    
-    # Với người dùng không có sự khác biệt, gán giá trị mặc định 0.5
-    merged_df.loc[~mask_diff, 'normalized_rating'] = 0.5
-    
-    return merged_df[['userId', 'movieId', 'rating', 'normalized_rating']]
+    return result_df[['userId', 'movieId', 'rating', 'normalized_rating']]
 
 # Apply normalization
 print("\nNormalizing ratings...")
