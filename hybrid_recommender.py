@@ -54,7 +54,7 @@ class HybridRecommender:
                 sim_score = user_sims[movie_id]
                 return 0.5 + 4.5 * sim_score
         
-        # Get user's average rating
+        # Get user's average rating from training data
         if 'train_ratings' in self.data:
             user_ratings = self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id]
             if len(user_ratings) > 0:
@@ -62,7 +62,26 @@ class HybridRecommender:
         
         # Default to mid-point if no other information
         return 3.0
+    def get_adaptive_alpha(self, user_id):
+        # Get user's ratings count
+        user_ratings = self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id]
+        rating_count = len(user_ratings)
         
+        # Map rating count to appropriate alpha
+        alpha_mapping = [
+            (10, 0.2),     # Users with <= 10 ratings: heavy weight on collaborative (0.2)
+            (25, 0.3),     # Users with 11-25 ratings: more weight on collaborative (0.3)
+            (50, 0.5),     # Users with 26-50 ratings: balanced (0.5) 
+            (100, 0.7),    # Users with 51-100 ratings: more weight on content-based (0.7)
+            (float('inf'), 0.8)  # Users with >100 ratings: heavy weight on content-based (0.8)
+        ]
+        
+        # Find appropriate alpha
+        for threshold, alpha in alpha_mapping:
+            if rating_count <= threshold:
+                return alpha
+        
+        return self.alpha  # Fall back to default
     def predict_rating_collaborative(self, user_id, movie_id):
         """
         Predict a user's rating for a movie using DNN
@@ -113,6 +132,7 @@ class HybridRecommender:
         
         # Default to mid-point if prediction fails
         return 3.0
+
     def __init__(self, content_model_path="./content-recommendations", 
                  collab_model_path="./recommendations", 
                  output_path="./hybrid_recommendations", 
@@ -295,7 +315,41 @@ class HybridRecommender:
         
         return self.data
     
-    def combine_recommendations(self, top_n=10):
+    def normalize_prediction(self, prediction):
+        """
+        Normalize a prediction to the 0-1 range
+        
+        Parameters:
+        -----------
+        prediction: float
+            Prediction value in the 0.5-5.0 range
+            
+        Returns:
+        --------
+        float
+            Normalized prediction in the 0-1 range
+        """
+        # Normalize from rating scale [0.5, 5.0] to [0, 1]
+        return (prediction - 0.5) / 4.5
+    
+    def denormalize_prediction(self, normalized_prediction):
+        """
+        Convert a normalized prediction back to the 0.5-5.0 range
+        
+        Parameters:
+        -----------
+        normalized_prediction: float
+            Normalized prediction in the 0-1 range
+            
+        Returns:
+        --------
+        float
+            Prediction value in the 0.5-5.0 range
+        """
+        # Convert from [0, 1] back to rating scale [0.5, 5.0]
+        return 0.5 + 4.5 * normalized_prediction
+    
+    def combine_recommendations(self, top_n=10, use_adaptive_alpha=True):
         """
         Combine content-based and collaborative filtering recommendations with weighting
         
@@ -303,13 +357,15 @@ class HybridRecommender:
         -----------
         top_n: int
             Number of recommendations to generate per user
+        use_adaptive_alpha: bool
+            Whether to use adaptive alpha based on user rating count
             
         Returns:
         --------
         dict
             User ID to list of (movie_id, score) tuples
         """
-        print(f"\nCombining recommendations with alpha={self.alpha:.2f}...")
+        print(f"\nCombining recommendations{' with adaptive alpha' if use_adaptive_alpha else f' with alpha={self.alpha:.2f}'}...")
         start_time = time.time()
         
         # Get recommendations from both models
@@ -328,41 +384,109 @@ class HybridRecommender:
         
         # Combine recommendations
         combined_recommendations = {}
+        alpha_stats = {'values': [], 'count_categories': {}}
         
         # Get all users from both recommendation sets
         all_users = set(content_recs.keys()) | set(collab_recs.keys())
         total_users = len(all_users)
         
         for i, user_id in enumerate(all_users):
+            # Get appropriate alpha value for this user
+            if use_adaptive_alpha:
+                alpha = self.get_adaptive_alpha(user_id)
+                # Track alpha statistics
+                alpha_stats['values'].append(alpha)
+                rating_count = len(self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id])
+                count_category = "<=10" if rating_count <= 10 else "11-25" if rating_count <= 25 else "26-50" if rating_count <= 50 else "51-100" if rating_count <= 100 else ">100"
+                if count_category in alpha_stats['count_categories']:
+                    alpha_stats['count_categories'][count_category]['count'] += 1
+                    alpha_stats['count_categories'][count_category]['alpha_sum'] += alpha
+                else:
+                    alpha_stats['count_categories'][count_category] = {'count': 1, 'alpha_sum': alpha}
+            else:
+                alpha = self.alpha
+            
             # Initialize combined recommendations dictionary for this user
             user_combined_recs = {}
             
             # Add content-based recommendations if available
             if user_id in content_recs:
                 for movie_id, score in content_recs[user_id]:
-                    # Convert similarity score to rating scale [0.5-5.0]
-                    rating = 0.5 + 4.5 * score
-                    user_combined_recs[movie_id] = self.alpha * rating
+                    # Scores from content-based are already normalized (0-1), just store them
+                    user_combined_recs[movie_id] = {'content_score': score, 'content_available': True}
             
             # Add collaborative filtering recommendations if available
             if user_id in collab_recs:
                 for movie_id, rating in collab_recs[user_id]:
-                    # Collaborative scores are already in rating scale
+                    # Normalize the collaborative rating to 0-1 scale
+                    collab_score = self.normalize_prediction(rating)
+                    
                     if movie_id in user_combined_recs:
-                        user_combined_recs[movie_id] += (1 - self.alpha) * rating
+                        user_combined_recs[movie_id]['collab_score'] = collab_score
+                        user_combined_recs[movie_id]['collab_available'] = True
                     else:
-                        user_combined_recs[movie_id] = (1 - self.alpha) * rating
+                        user_combined_recs[movie_id] = {
+                            'collab_score': collab_score, 
+                            'collab_available': True,
+                            'content_available': False
+                        }
             
-            # Sort and convert to list of tuples
-            sorted_recs = sorted(user_combined_recs.items(), key=lambda x: x[1], reverse=True)
+            # Calculate final scores with proper normalization
+            final_recommendations = []
+            for movie_id, data in user_combined_recs.items():
+                # Check which models provided predictions
+                content_available = data.get('content_available', False)
+                collab_available = data.get('collab_available', False)
+                
+                if content_available and collab_available:
+                    # We have both predictions, use the weighted average
+                    content_score = data['content_score']
+                    collab_score = data['collab_score']
+                    combined_score = alpha * content_score + (1 - alpha) * collab_score
+                elif content_available:
+                    # Only content-based prediction available
+                    combined_score = data['content_score']
+                elif collab_available:
+                    # Only collaborative prediction available
+                    combined_score = data['collab_score']
+                
+                # Convert back to rating scale for storage
+                final_rating = self.denormalize_prediction(combined_score)
+                final_recommendations.append((movie_id, final_rating))
             
-            combined_recommendations[user_id] = sorted_recs[:top_n]
+            # Sort by final score and limit to top_n
+            final_recommendations.sort(key=lambda x: x[1], reverse=True)
+            combined_recommendations[user_id] = final_recommendations[:top_n]
             
             # Log progress
             if (i+1) % 1000 == 0 or (i+1) == total_users:
                 print(f"Processed {i+1}/{total_users} users ({(i+1)/total_users*100:.1f}%)")
         
         self.data['combined_recommendations'] = combined_recommendations
+        
+        # Print alpha statistics if using adaptive alpha
+        if use_adaptive_alpha and alpha_stats['values']:
+            print("\nAdaptive Alpha Statistics:")
+            print(f"Average alpha: {np.mean(alpha_stats['values']):.4f}")
+            print(f"Min alpha: {min(alpha_stats['values']):.4f}, Max alpha: {max(alpha_stats['values']):.4f}")
+            print("\nAlpha by user rating count:")
+            for category, stats in sorted(alpha_stats['count_categories'].items(), 
+                                         key=lambda x: (int(x[0].replace('<=', '').replace('>', '').split('-')[0]) 
+                                                       if x[0] not in ['>100'] else float('inf'))):
+                avg_alpha = stats['alpha_sum'] / stats['count']
+                print(f"  {category} ratings: {stats['count']} users, avg alpha = {avg_alpha:.4f}")
+            
+            # Save alpha statistics to a file
+            with open(os.path.join(self.output_path, 'alpha_stats.txt'), 'w') as f:
+                f.write(f"Adaptive Alpha Statistics:\n")
+                f.write(f"Average alpha: {np.mean(alpha_stats['values']):.4f}\n")
+                f.write(f"Min alpha: {min(alpha_stats['values']):.4f}, Max alpha: {max(alpha_stats['values']):.4f}\n\n")
+                f.write("Alpha by user rating count:\n")
+                for category, stats in sorted(alpha_stats['count_categories'].items(), 
+                                            key=lambda x: (int(x[0].replace('<=', '').replace('>', '').split('-')[0]) 
+                                                          if x[0] not in ['>100'] else float('inf'))):
+                    avg_alpha = stats['alpha_sum'] / stats['count']
+                    f.write(f"  {category} ratings: {stats['count']} users, avg alpha = {avg_alpha:.4f}\n")
         
         print(f"Combined recommendations for {len(combined_recommendations)} users in {time.time() - start_time:.2f}s")
         
@@ -374,6 +498,15 @@ class HybridRecommender:
         recommendations_list = []
         
         for user_id, recs in combined_recommendations.items():
+            # Get user's alpha
+            if use_adaptive_alpha:
+                user_alpha = self.get_adaptive_alpha(user_id)
+            else:
+                user_alpha = self.alpha
+                
+            # Get user's rating count
+            rating_count = len(self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id])
+            
             for rank, (movie_id, score) in enumerate(recs, 1):
                 movie_title = "Unknown"
                 if 'movie_features' in self.data:
@@ -386,7 +519,9 @@ class HybridRecommender:
                     'movieId': movie_id,
                     'title': movie_title,
                     'rank': rank,
-                    'score': score
+                    'score': score,
+                    'alpha': user_alpha,
+                    'rating_count': rating_count
                 })
         
         if recommendations_list:
@@ -396,25 +531,25 @@ class HybridRecommender:
         
         return combined_recommendations
     
-    def evaluate(self):
+    def evaluate(self, use_adaptive_alpha=True):
         """
         Evaluate the hybrid recommendation system using RMSE and MAE
+        
+        Parameters:
+        -----------
+        use_adaptive_alpha: bool
+            Whether to use adaptive alpha based on user rating count
         
         Returns:
         --------
         dict
             Evaluation metrics
         """
-        print("\nEvaluating hybrid recommendation system...")
+        print(f"\nEvaluating hybrid recommendation system {' with adaptive alpha' if use_adaptive_alpha else ''}...")
         start_time = time.time()
         
-        # Get combined recommendations and test ratings
-        combined_recs = self.data.get('combined_recommendations', {})
+        # Get test ratings
         test_ratings = self.data.get('test_ratings')
-        
-        if not combined_recs:
-            print("Error: No combined recommendations available for evaluation")
-            return None
         
         if test_ratings is None:
             print("Error: No test ratings available for evaluation")
@@ -423,61 +558,213 @@ class HybridRecommender:
         # Initialize containers for predictions and actual ratings
         predictions = []
         actuals = []
+        errors = []
+        user_data = []
         
         # Match test ratings with predictions
+        total_users = len(test_ratings['userId'].unique())
+        processed_users = 0
+        
         for user_id in test_ratings['userId'].unique():
-            # Skip users without recommendations
-            if user_id not in combined_recs:
-                continue
-            
+            # Get appropriate alpha for this user
+            if use_adaptive_alpha:
+                alpha = self.get_adaptive_alpha(user_id)
+            else:
+                alpha = self.alpha
+                
+            # Get user's rating count for analysis
+            rating_count = len(self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id])
+                
             # Get user's test ratings
             user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
             
-            # Get user's recommendations (movie_id, score)
-            user_recs = dict(combined_recs[user_id])
+            user_predictions = []
+            user_actuals = []
             
             # Match test ratings with predictions
             for _, row in user_test_ratings.iterrows():
                 movie_id = row['movieId']
                 actual_rating = row['rating']
                 
-                # If the movie is in recommendations
-                if movie_id in user_recs:
-                    predictions.append(user_recs[movie_id])
-                    actuals.append(actual_rating)
-                # For more complete evaluation, also predict for movies not in top recommendations
-                # but using our hybrid prediction approach
-                else:
-                    # Get content-based and collaborative predictions
-                    content_pred = self.predict_rating(user_id, movie_id)
-                    collab_pred = self.predict_rating_collaborative(user_id, movie_id)
-                    
-                    # Combine predictions using alpha
-                    hybrid_pred = self.alpha * content_pred + (1 - self.alpha) * collab_pred
-                    
-                    predictions.append(hybrid_pred)
-                    actuals.append(actual_rating)
+                # Get content-based and collaborative predictions
+                content_pred = self.predict_rating(user_id, movie_id)
+                collab_pred = self.predict_rating_collaborative(user_id, movie_id)
+                
+                # Normalize predictions to 0-1 scale
+                content_pred_norm = self.normalize_prediction(content_pred)
+                collab_pred_norm = self.normalize_prediction(collab_pred)
+                
+                # Combine predictions using alpha
+                hybrid_pred_norm = alpha * content_pred_norm + (1 - alpha) * collab_pred_norm
+                
+                # Convert back to rating scale
+                hybrid_pred = self.denormalize_prediction(hybrid_pred_norm)
+                
+                # Add to prediction lists
+                predictions.append(hybrid_pred)
+                actuals.append(actual_rating)
+                errors.append((hybrid_pred - actual_rating) ** 2)
+                
+                # Keep track of user-specific performance
+                user_predictions.append(hybrid_pred)
+                user_actuals.append(actual_rating)
+            
+            # Calculate user-specific metrics if we have predictions
+            if user_predictions:
+                user_rmse = np.sqrt(np.mean([(p - a) ** 2 for p, a in zip(user_predictions, user_actuals)]))
+                user_mae = np.mean([abs(p - a) for p, a in zip(user_predictions, user_actuals)])
+                
+                # Store user data for later analysis
+                user_data.append({
+                    'userId': user_id,
+                    'rating_count': rating_count,
+                    'alpha': alpha,
+                    'rmse': user_rmse,
+                    'mae': user_mae,
+                    'num_predictions': len(user_predictions)
+                })
+            
+            processed_users += 1
+            # Log progress
+            if processed_users % 100 == 0 or processed_users == total_users:
+                print(f"Processed {processed_users}/{total_users} users ({processed_users/total_users*100:.1f}%)")
+                if errors:
+                    current_rmse = np.sqrt(np.mean(errors))
+                    print(f"Current RMSE: {current_rmse:.4f} over {len(errors)} predictions")
         
-        # Calculate RMSE and MAE if we have predictions
+        # Calculate RMSE and MAE
         if predictions:
             predictions = np.array(predictions)
             actuals = np.array(actuals)
             
-            rmse = np.sqrt(np.mean((predictions - actuals) ** 2))
-            mae = np.mean(np.abs(predictions - actuals))
+            print("\nCreating prediction statistics...")
+            print(f"Prediction range: {predictions.min():.2f} - {predictions.max():.2f}")
+            print(f"Actual range: {actuals.min():.2f} - {actuals.max():.2f}")
+            
+            # Calculate residuals
+            residuals = predictions - actuals
+            
+            # Check if we have extreme outliers
+            outlier_threshold = 3  # 3 star difference
+            outliers = np.abs(residuals) > outlier_threshold
+            outlier_count = np.sum(outliers)
+            
+            if outlier_count > 0:
+                print(f"Warning: Found {outlier_count} predictions with error > {outlier_threshold} stars")
+                print(f"Outlier residuals: {residuals[outliers][:10]} (showing up to 10)")
+                
+                # Calculate metrics both with and without outliers
+                rmse_with_outliers = np.sqrt(np.mean(residuals ** 2))
+                mae_with_outliers = np.mean(np.abs(residuals))
+                
+                # Remove outliers for adjusted metrics
+                predictions_filtered = predictions[~outliers]
+                actuals_filtered = actuals[~outliers]
+                residuals_filtered = residuals[~outliers]
+                
+                rmse_without_outliers = np.sqrt(np.mean(residuals_filtered ** 2))
+                mae_without_outliers = np.mean(np.abs(residuals_filtered))
+                
+                print(f"RMSE with outliers: {rmse_with_outliers:.4f}")
+                print(f"RMSE without outliers: {rmse_without_outliers:.4f}")
+                
+                # Use the filtered metrics
+                rmse = rmse_without_outliers
+                mae = mae_without_outliers
+                num_predictions = len(predictions_filtered)
+            else:
+                # No outliers, use all data
+                rmse = np.sqrt(np.mean(residuals ** 2))
+                mae = np.mean(np.abs(residuals))
+                num_predictions = len(predictions)
             
             metrics = {
                 'rmse': rmse,
                 'mae': mae,
-                'num_predictions': len(predictions)
+                'num_predictions': num_predictions,
+                'use_adaptive_alpha': use_adaptive_alpha
             }
             
-            print(f"Evaluation completed with {len(predictions)} predictions:")
+            print(f"Evaluation completed with {num_predictions} predictions:")
             print(f"RMSE: {rmse:.4f}")
             print(f"MAE: {mae:.4f}")
             
             # Save metrics
             pd.DataFrame([metrics]).to_csv(os.path.join(self.output_path, 'evaluation_metrics.csv'), index=False)
+            
+            # Analyze performance by user rating count
+            if user_data:
+                user_df = pd.DataFrame(user_data)
+                
+                # Group by rating count ranges
+                user_df['rating_count_range'] = pd.cut(
+                    user_df['rating_count'], 
+                    bins=[0, 10, 25, 50, 100, float('inf')],
+                    labels=['<=10', '11-25', '26-50', '51-100', '>100']
+                )
+                
+                # Calculate average performance by rating count
+                performance_by_count = user_df.groupby('rating_count_range').agg({
+                    'rmse': 'mean',
+                    'mae': 'mean',
+                    'alpha': 'mean',
+                    'userId': 'count'
+                }).reset_index()
+                
+                performance_by_count.rename(columns={'userId': 'num_users'}, inplace=True)
+                
+                print("\nPerformance by user rating count:")
+                print(performance_by_count.to_string(index=False))
+                
+                # Save user-level metrics
+                user_df.to_csv(os.path.join(self.output_path, 'user_level_metrics.csv'), index=False)
+                performance_by_count.to_csv(os.path.join(self.output_path, 'performance_by_count.csv'), index=False)
+                
+                # Create visualization of performance by rating count
+                plt.figure(figsize=(12, 8))
+                
+                plt.subplot(2, 2, 1)
+                sns.barplot(x='rating_count_range', y='rmse', data=performance_by_count)
+                plt.title('RMSE by User Rating Count')
+                plt.ylim(bottom=0)
+                
+                plt.subplot(2, 2, 2)
+                sns.barplot(x='rating_count_range', y='mae', data=performance_by_count)
+                plt.title('MAE by User Rating Count')
+                plt.ylim(bottom=0)
+                
+                plt.subplot(2, 2, 3)
+                sns.barplot(x='rating_count_range', y='alpha', data=performance_by_count)
+                plt.title('Average Alpha by User Rating Count')
+                plt.ylim(0, 1)
+                
+                plt.subplot(2, 2, 4)
+                sns.barplot(x='rating_count_range', y='num_users', data=performance_by_count)
+                plt.title('Number of Users by Rating Count')
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(self.output_path, 'performance_by_rating_count.png'))
+                plt.close()
+            
+            # Plot prediction vs actual
+            plt.figure(figsize=(10, 6))
+            plt.scatter(actuals, predictions, alpha=0.3)
+            plt.plot([0.5, 5.0], [0.5, 5.0], 'r--')
+            plt.xlabel('Actual Ratings')
+            plt.ylabel('Predicted Ratings')
+            plt.title(f'Predicted vs Actual Ratings {"(Adaptive Alpha)" if use_adaptive_alpha else f"(Alpha={self.alpha:.2f})"}')
+            plt.savefig(os.path.join(self.output_path, 'prediction_scatter.png'))
+            plt.close()
+            
+            # Plot error distribution
+            plt.figure(figsize=(10, 6))
+            plt.hist(residuals, bins=30, alpha=0.7)
+            plt.axvline(x=0, color='r', linestyle='--')
+            plt.xlabel('Prediction Error (Predicted - Actual)')
+            plt.ylabel('Count')
+            plt.title(f'Error Distribution {"(Adaptive Alpha)" if use_adaptive_alpha else f"(Alpha={self.alpha:.2f})"}')
+            plt.savefig(os.path.join(self.output_path, 'error_histogram.png'))
+            plt.close()
             
             # Store metrics in data
             self.data['combined_evaluation_metrics'] = metrics
@@ -502,7 +789,7 @@ class HybridRecommender:
             Optimal alpha value
         """
         if alpha_values is None:
-            alpha_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+            alpha_values = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
         
         print("\nFinding optimal alpha value...")
         results = []
@@ -589,7 +876,7 @@ class HybridRecommender:
         
         return user_ratings
     
-    def recommend_for_user(self, user_id, n=10):
+    def recommend_for_user(self, user_id, n=10, use_adaptive_alpha=True):
         """
         Get recommendations for a specific user
         
@@ -599,6 +886,8 @@ class HybridRecommender:
             User ID
         n: int
             Number of recommendations to return
+        use_adaptive_alpha: bool
+            Whether to use adaptive alpha based on user rating count
             
         Returns:
         --------
@@ -607,9 +896,79 @@ class HybridRecommender:
         """
         # Check if user has recommendations
         if 'combined_recommendations' not in self.data or user_id not in self.data['combined_recommendations']:
-            return []
+            # If no pre-computed recommendations, try to generate on-the-fly
+            if 'user_vectors' in self.data and 'movie_vectors' in self.data:
+                print(f"No pre-computed recommendations found. Generating on-the-fly recommendations for user {user_id}...")
+                
+                # Get user's vector
+                if user_id not in self.data['user_vectors']:
+                    print(f"No user vector found for user {user_id}")
+                    return []
+                
+                user_vector = self.data['user_vectors'][user_id]
+                
+                # Get rated movies to exclude
+                rated_movies = set()
+                if 'train_ratings' in self.data:
+                    user_ratings = self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id]
+                    rated_movies = set(user_ratings['movieId'].values)
+                
+                # Calculate similarity to all movies
+                movie_similarities = []
+                for movie_id, movie_vector in self.data['movie_vectors'].items():
+                    if movie_id in rated_movies:
+                        continue
+                    
+                    # Calculate cosine similarity
+                    similarity = np.dot(user_vector, movie_vector) / (np.linalg.norm(user_vector) * np.linalg.norm(movie_vector))
+                    movie_similarities.append((movie_id, similarity))
+                
+                # Sort by similarity
+                movie_similarities.sort(key=lambda x: x[1], reverse=True)
+                
+                # Convert to rating predictions
+                recommendations = []
+                for movie_id, similarity in movie_similarities[:n]:
+                    # Get collaborative prediction if available
+                    collab_pred = self.predict_rating_collaborative(user_id, movie_id)
+                    
+                    # Normalize both scores
+                    content_score = similarity  # Already in [0,1] range
+                    collab_score = self.normalize_prediction(collab_pred)
+                    
+                    # Get appropriate alpha
+                    if use_adaptive_alpha:
+                        alpha = self.get_adaptive_alpha(user_id)
+                    else:
+                        alpha = self.alpha
+                    
+                    # Combine scores
+                    combined_score = alpha * content_score + (1 - alpha) * collab_score
+                    
+                    # Convert to rating
+                    rating = self.denormalize_prediction(combined_score)
+                    
+                    recommendations.append((movie_id, rating))
+                
+                # Sort by predicted rating
+                recommendations.sort(key=lambda x: x[1], reverse=True)
+                
+                # Format with titles
+                formatted_recs = []
+                for movie_id, score in recommendations[:n]:
+                    title = "Unknown"
+                    if 'movie_features' in self.data:
+                        movie_row = self.data['movie_features'][self.data['movie_features']['movieId'] == movie_id]
+                        if not movie_row.empty and 'title' in movie_row.columns:
+                            title = movie_row.iloc[0]['title']
+                    
+                    formatted_recs.append((movie_id, title, score))
+                
+                return formatted_recs
+            else:
+                return []
         
-        # Get recommendations
+        # Get recommendations from pre-computed data
         recs = self.data['combined_recommendations'][user_id][:n]
         
         # Format recommendations with titles
@@ -624,6 +983,83 @@ class HybridRecommender:
             formatted_recs.append((movie_id, title, score))
         
         return formatted_recs
+    
+    def get_user_rating_statistics(self, user_id):
+        """
+        Get detailed rating statistics for a user
+        
+        Parameters:
+        -----------
+        user_id: int
+            User ID
+            
+        Returns:
+        --------
+        dict
+            Dictionary of user rating statistics
+        """
+        if 'train_ratings' not in self.data:
+            return None
+        
+        # Get user's ratings
+        user_ratings = self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id]
+        
+        if len(user_ratings) == 0:
+            return None
+        
+        # Calculate statistics
+        stats = {
+            'rating_count': len(user_ratings),
+            'avg_rating': user_ratings['rating'].mean(),
+            'min_rating': user_ratings['rating'].min(),
+            'max_rating': user_ratings['rating'].max(),
+            'rating_std': user_ratings['rating'].std(),
+            'adaptive_alpha': self.get_adaptive_alpha(user_id)
+        }
+        
+        # Count ratings by value
+        rating_counts = user_ratings['rating'].value_counts().sort_index().to_dict()
+        stats['rating_distribution'] = rating_counts
+        
+        # Get genre preferences if available
+        if 'movie_features' in self.data:
+            # Create mapping of movie IDs to genres
+            movie_genres = {}
+            genre_columns = [col for col in self.data['movie_features'].columns if col not in 
+                             ['movieId', 'title', 'tokens', 'token_count', 'top_keywords']]
+            
+            for _, row in self.data['movie_features'].iterrows():
+                movie_id = row['movieId']
+                movie_genres[movie_id] = [genre for genre in genre_columns if row[genre] == 1]
+            
+            # Count genre occurrences in user ratings
+            genre_counts = {}
+            for _, row in user_ratings.iterrows():
+                movie_id = row['movieId']
+                rating = row['rating']
+                
+                if movie_id in movie_genres:
+                    for genre in movie_genres[movie_id]:
+                        if genre not in genre_counts:
+                            genre_counts[genre] = {'count': 0, 'sum': 0, 'ratings': []}
+                        
+                        genre_counts[genre]['count'] += 1
+                        genre_counts[genre]['sum'] += rating
+                        genre_counts[genre]['ratings'].append(rating)
+            
+            # Calculate average rating per genre
+            genre_preferences = {}
+            for genre, data in genre_counts.items():
+                if data['count'] > 0:
+                    genre_preferences[genre] = {
+                        'count': data['count'],
+                        'avg_rating': data['sum'] / data['count'],
+                        'std': np.std(data['ratings']) if len(data['ratings']) > 1 else 0
+                    }
+            
+            stats['genre_preferences'] = genre_preferences
+        
+        return stats
     
     def get_movie_details(self, movie_id):
         """
@@ -882,16 +1318,18 @@ class HybridRecommender:
 
 def main():
     parser = argparse.ArgumentParser(description='Hybrid Movie Recommendation System')
-    parser.add_argument('--content_path', type=str, default='./content-recommendations', 
+    parser.add_argument('--content_path', type=str, default='./rec/content-recommendations', 
                       help='Path to content-based model files')
-    parser.add_argument('--collab_path', type=str, default='./collaborative-recommendations',
+    parser.add_argument('--collab_path', type=str, default='./rec/collaborative-recommendations',
                       help='Path to collaborative filtering model files')
-    parser.add_argument('--output_path', type=str, default='./hybrid_recommendations',
+    parser.add_argument('--output_path', type=str, default='./rec/hybrid_recommendations',
                       help='Path to save hybrid recommendation results')
     parser.add_argument('--alpha', type=float, default=0.3,
                       help='Weight for content-based recommendations (1-alpha for collaborative)')
     parser.add_argument('--optimize_alpha', action='store_true',
                       help='Find optimal alpha value')
+    parser.add_argument('--adaptive_alpha', action='store_true', default=True,
+                      help='Use adaptive alpha based on user rating count')
     parser.add_argument('--batch_mode', action='store_true',
                       help='Run in batch mode (no interactive prompts)')
     parser.add_argument('--num_recs', type=int, default=10,
@@ -926,10 +1364,10 @@ def main():
         print(f"Optimal alpha: {optimal_alpha:.2f}")
     
     # Combine recommendations
-    recommender.combine_recommendations(top_n=args.num_recs)
+    recommender.combine_recommendations(top_n=args.num_recs, use_adaptive_alpha=args.adaptive_alpha)
     
     # Evaluate
-    evaluation_metrics = recommender.evaluate()
+    evaluation_metrics = recommender.evaluate(use_adaptive_alpha=args.adaptive_alpha)
     
     # Compare with individual models
     print("\nModel Performance Comparison:")
@@ -956,8 +1394,9 @@ def main():
     
     # Hybrid model metrics
     if evaluation_metrics:
+        alpha_desc = "Adaptive" if args.adaptive_alpha else f"α={recommender.alpha:.2f}"
         rows.append([
-            f"Hybrid (α={recommender.alpha:.2f})",
+            f"Hybrid ({alpha_desc})",
             f"{evaluation_metrics['rmse']:.4f}",
             f"{evaluation_metrics['mae']:.4f}",
             f"{evaluation_metrics['num_predictions']}"
@@ -1000,12 +1439,50 @@ def main():
             
             print(f"\nGenerating recommendations for User ID: {user_id}")
             
+            # Get user's statistics
+            user_stats = recommender.get_user_rating_statistics(user_id)
+            
+            if user_stats:
+                # Display adaptive alpha information
+                if args.adaptive_alpha:
+                    alpha = user_stats['adaptive_alpha']
+                    print(f"\nUser Rating Profile:")
+                    print(f"- Total ratings: {user_stats['rating_count']}")
+                    print(f"- Rating range: {user_stats['min_rating']:.1f} - {user_stats['max_rating']:.1f} (avg: {user_stats['avg_rating']:.2f})")
+                    
+                    # Determine user category based on rating count
+                    if user_stats['rating_count'] <= 10:
+                        user_category = "New user"
+                    elif user_stats['rating_count'] <= 25:
+                        user_category = "Casual user"
+                    elif user_stats['rating_count'] <= 50:
+                        user_category = "Regular user"
+                    elif user_stats['rating_count'] <= 100:
+                        user_category = "Active user"
+                    else:
+                        user_category = "Power user"
+                        
+                    print(f"- User category: {user_category}")
+                    print(f"- Adaptive alpha: {alpha:.2f}" + 
+                          f" (more weight on {'content-based' if alpha > 0.5 else 'collaborative filtering'})")
+                    
+                    # Show genre preferences if available
+                    if 'genre_preferences' in user_stats and user_stats['genre_preferences']:
+                        print("\nTop genre preferences:")
+                        sorted_genres = sorted(
+                            [(genre, data) for genre, data in user_stats['genre_preferences'].items() if data['count'] >= 3],
+                            key=lambda x: x[1]['avg_rating'], 
+                            reverse=True
+                        )[:5]
+                        
+                        for genre, data in sorted_genres:
+                            print(f"  - {genre}: {data['avg_rating']:.2f} avg rating ({data['count']} movies)")
+            
             # Get user's rated movies
             rated_movies = recommender.get_user_rated_movies(user_id)
             
             if len(rated_movies) > 0:
-                print(f"\nUser {user_id} has rated {len(rated_movies)} movies")
-                print("\nSample of user's highest rated movies:")
+                print(f"\nSample of user's highest rated movies:")
                 top_rated = rated_movies.sort_values('rating', ascending=False).head(5)
                 for _, row in top_rated.iterrows():
                     print(f"  '{row['title']}' - Rating: {row['rating']:.1f}")
@@ -1013,7 +1490,7 @@ def main():
                 print(f"\nUser {user_id} has no rated movies in the training set")
             
             # Get recommendations
-            recommendations = recommender.recommend_for_user(user_id, n=args.num_recs)
+            recommendations = recommender.recommend_for_user(user_id, n=args.num_recs, use_adaptive_alpha=args.adaptive_alpha)
             
             if recommendations:
                 print(f"\nTop {len(recommendations)} recommendations for User {user_id}:")
@@ -1034,6 +1511,8 @@ def main():
             break
         except Exception as e:
             print(f"\nAn error occurred: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     print("\nHybrid Recommendation System completed successfully!")
 

@@ -283,21 +283,16 @@ print("\nUser rating statistics plot saved as 'user_rating_stats.png'")
 plt.close()
 
 def normalize_ratings(ratings_df):
-    """Normalize ratings using Min-Max scaling"""
-    # Create a copy to avoid modifying the original data
+    """Normalize ratings using a consistent global Min-Max scaling from [0.5-5.0] to [0-1]"""
+    # Create a copy to avoid affecting the original data
     result_df = ratings_df.copy()
     
-    # Group ratings by user for min-max scaling
-    def min_max_scale_user_ratings(user_ratings):
-        # Handle users with only one rating or all identical ratings
-        if len(user_ratings) <= 1 or user_ratings.min() == user_ratings.max():
-            return pd.Series(0.5, index=user_ratings.index)
-        
-        # Perform min-max scaling
-        return (user_ratings - user_ratings.min()) / (user_ratings.max() - user_ratings.min())
+    # Define global min and max for the rating scale
+    global_min = 0.5  # Minimum possible rating in MovieLens dataset
+    global_max = 5.0  # Maximum possible rating in MovieLens dataset
     
-    # Apply min-max scaling to each user's ratings
-    result_df['normalized_rating'] = result_df.groupby('userId')['rating'].transform(min_max_scale_user_ratings)
+    # Apply global min-max scaling
+    result_df['normalized_rating'] = (result_df['rating'] - global_min) / (global_max - global_min)
     
     return result_df[['userId', 'movieId', 'rating', 'normalized_rating']]
 
