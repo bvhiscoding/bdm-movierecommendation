@@ -45,8 +45,8 @@ if not os.path.exists(output_path):
 # lemmatizer = WordNetLemmatizer()
 
 # Model parameters/
-similarity_threshold = 0.5  # Minimum similarity to consider
-word2vec_dim = 300  # Dimensionality of Word2Vec embeddings
+similarity_threshold = 0.3  # Minimum similarity to consider
+word2vec_dim = 100  # Dimensionality of Word2Vec embeddings
 
 print("\n" + "="*80)
 print("STEP 1: DATA LOADING")
@@ -129,9 +129,20 @@ def load_data():
             if len(train_chunks) >= 1000 or user_count == total_users:
                 gc.collect()  # Force garbage collection
         
-        # Concatenate all chunks
-        data['train_ratings'] = pd.concat(train_chunks).reset_index(drop=True)
-        data['test_ratings'] = pd.concat(test_chunks).reset_index(drop=True)
+        # Get all unique user IDs
+        all_user_ids = data['ratings']['userId'].unique()
+
+        # Split users into train (80%) and test (20%) sets
+        np.random.seed(42)  # For reproducibility
+        np.random.shuffle(all_user_ids)
+
+        split_idx = int(len(all_user_ids) * 0.8)
+        train_users = all_user_ids[:split_idx]
+        test_users = all_user_ids[split_idx:]
+
+        # Split ratings based on user assignments
+        data['train_ratings'] = data['ratings'][data['ratings']['userId'].isin(train_users)]
+        data['test_ratings'] = data['ratings'][data['ratings']['userId'].isin(test_users)]
         
         # Free memory
         del train_chunks, test_chunks
@@ -328,8 +339,8 @@ def train_word2vec(movie_features, vector_size=100, batch_size=1000):
         window=5,
         min_count=5,
         workers=4,
-        epochs=30,  # Reduced from 50 to save memory
-        sg=0  # CBOW model
+        epochs=25,  # Reduced from 50 to save memory
+        sg=1  # CBOW model
     )
     
     # Free memory - no longer need the full corpus
@@ -1029,6 +1040,7 @@ print("\n" + "="*80)
 print("STEP 9: MODEL EVALUATION")
 print("="*80)
 
+# Thay đổi hàm evaluate_with_rmse_mae như sau:
 def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings, batch_size=100):
     """
     Evaluate the recommendations using RMSE and MAE with batching for memory efficiency
@@ -1052,12 +1064,55 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
     print("Evaluating recommendation model using RMSE and MAE with batching...")
     start_time = time.time()
     
-    # Users with similarity data
-    users_with_similarity = set(user_movie_similarities.keys())
-    test_users = test_ratings['userId'].unique()
-    users_in_test_with_similarity = set(test_users).intersection(users_with_similarity)
+    # Lấy common users giữa test_ratings và training users
+    test_users = set(test_ratings['userId'].unique())
+    train_users = set(train_ratings['userId'].unique())
+    users_to_evaluate = test_users.intersection(train_users)
     
-    print(f"Users in test set with similarity data: {len(users_in_test_with_similarity)}/{len(test_users)} ({len(users_in_test_with_similarity)/len(test_users)*100:.1f}%)")
+    print(f"Users in test set: {len(test_users)}")
+    print(f"Users in training set: {len(train_users)}")
+    print(f"Users to evaluate (intersection): {len(users_to_evaluate)}")
+    
+    # Kiểm tra nếu chúng ta đang sử dụng user-based split
+    if len(users_to_evaluate) == 0:
+        print("Using user-based split - no common users between train and test.")
+        print("Evaluating using average rating for all predictions instead.")
+        
+        # Lấy average rating từ training set
+        avg_rating = train_ratings['rating'].mean()
+        
+        # Đếm số lượng dự đoán
+        total_predictions = len(test_ratings)
+        
+        # Tính MSE và MAE bằng cách dùng average rating làm dự đoán
+        squared_errors_sum = ((test_ratings['rating'] - avg_rating) ** 2).sum()
+        absolute_errors_sum = (abs(test_ratings['rating'] - avg_rating)).sum()
+        
+        # Tính RMSE và MAE
+        overall_rmse = np.sqrt(squared_errors_sum / total_predictions)
+        overall_mae = absolute_errors_sum / total_predictions
+        
+        print("\nEvaluation results using average rating baseline:")
+        print(f"Total predictions: {total_predictions}")
+        print(f"RMSE: {overall_rmse:.4f}")
+        print(f"MAE: {overall_mae:.4f}")
+        
+        # Tạo metrics dictionary
+        metrics = {
+            'rmse': overall_rmse,
+            'mae': overall_mae,
+            'num_predictions': total_predictions,
+            'evaluation_method': 'average_rating_baseline'
+        }
+        
+        return metrics
+    
+    # Nếu có common users, tiếp tục với cách đánh giá gốc
+    # (Phần code gốc của bạn bắt đầu từ đây, giữ nguyên)
+    users_with_similarity = set(user_movie_similarities.keys())
+    users_in_test_with_similarity = users_to_evaluate.intersection(users_with_similarity)
+    
+    print(f"Users in test set with similarity data: {len(users_in_test_with_similarity)}/{len(users_to_evaluate)} ({len(users_in_test_with_similarity)/len(users_to_evaluate)*100:.1f}%)")
     
     # Track metrics in chunks instead of storing all predictions
     squared_errors_sum = 0

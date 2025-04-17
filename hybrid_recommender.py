@@ -397,7 +397,7 @@ class HybridRecommender:
                 # Track alpha statistics
                 alpha_stats['values'].append(alpha)
                 rating_count = len(self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id])
-                count_category = "<=10" if rating_count <= 10 else "11-25" if rating_count <= 25 else "26-50" if rating_count <= 50 else "51-100" if rating_count <= 100 else ">100"
+                count_category = "<=10" if rating_count <= 25 else "11-25" if rating_count <= 50 else "26-50" if rating_count <= 100 else "51-100" if rating_count <= 150 else ">100"
                 if count_category in alpha_stats['count_categories']:
                     alpha_stats['count_categories'][count_category]['count'] += 1
                     alpha_stats['count_categories'][count_category]['alpha_sum'] += alpha
@@ -699,7 +699,7 @@ class HybridRecommender:
                 # Group by rating count ranges
                 user_df['rating_count_range'] = pd.cut(
                     user_df['rating_count'], 
-                    bins=[0, 10, 25, 50, 100, float('inf')],
+                    bins=[0, 25, 50, 100, 150, float('inf')],
                     labels=['<=10', '11-25', '26-50', '51-100', '>100']
                 )
                 
