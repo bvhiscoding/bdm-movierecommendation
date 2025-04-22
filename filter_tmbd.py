@@ -78,7 +78,7 @@ def filter_movielens_in_tmdb(movielens_files_dir, output_dir):
     # Lưu kết quả các phim không có trong TMDB vào file CSV riêng
     missing_file = os.path.join(output_dir, 'notintmdb.csv')
     # Chỉ lấy các thông tin từ MovieLens
-    movielens_not_in_tmdb[['movieId', 'title', 'genres']].to_csv(missing_file, index=False)
+    movielens_in_tmdb[['movieId', 'title', 'genres']].to_csv(missing_file, index=False)
     print(f"Đã lưu kết quả các phim không có trong TMDB vào: {missing_file}")
     
     # Hiển thị thông tin tổng kết

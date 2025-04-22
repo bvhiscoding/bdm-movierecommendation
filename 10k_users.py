@@ -19,7 +19,7 @@ ratings_df = pd.read_csv(f"{input_path}rating.csv")
 
 # Define user ID range to extract (1-10)
 min_user_id = 1
-max_user_id = 500
+max_user_id = 1000
 
 print(f"Filtering for users with IDs from {min_user_id} to {max_user_id}...")
 
@@ -44,7 +44,7 @@ print(f"These users have rated {len(movies_to_keep)} unique movies")
 
 # Load movie data
 print("Loading movie data...")
-movies_df = pd.read_csv(f"{input_path}movie.csv")
+movies_df = pd.read_csv(f"{input_path}26k_movies.csv")
 
 # Filter movies to only those rated by our target users
 filtered_movies = movies_df[movies_df['movieId'].isin(movies_to_keep)]
