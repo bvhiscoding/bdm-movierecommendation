@@ -1312,7 +1312,7 @@ for file in os.listdir(output_path):
     print(f"- {file} ({file_size:.2f} MB)")
 
 # Memory usage information
-import psutil
+import psutil 
 process = psutil.Process(os.getpid())
 memory_usage = process.memory_info().rss / (1024 * 1024)  # MB
 print(f"\nFinal memory usage: {memory_usage:.2f} MB")
