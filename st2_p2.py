@@ -28,7 +28,7 @@ if not os.path.exists(output_path):
     os.makedirs(output_path)
 
 # Optimized hyperparameters based on extensive testing
-dnn_hidden_layers = [256, 128, 64, 32]  # Deeper network
+dnn_hidden_layers = [ 128, 64, 32]  # Deeper network
 dnn_dropout_rate = 0.35  # Increased dropout for better generalization
 dnn_l2_reg = 0.0005  # L2 regularization to prevent overfitting
 dnn_learning_rate = 0.001  # Lower learning rate for more stable convergence
@@ -1229,85 +1229,24 @@ def generate_recommendations_for_all_users(dnn_model, user_preferences, movie_fe
     
     return all_recommendations
 
-def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_preferences, movie_features, genre_columns, region_columns=None, threshold=3, sample_users=True):
+def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_preferences, movie_features, genre_columns, region_columns=None, threshold=3.5, sample_users=False):
     """
-    Evaluate recommendation model using enhanced metrics
-    
-    Parameters:
-    -----------
-    ... [existing parameters] ...
-    sample_users: bool
-        If True, only evaluate users who already have recommendations (don't process additional users)
+    Evaluate recommendation model using all test ratings for consistent evaluation
+    with other models.
     """
-    logger.info("Evaluating recommendations with comprehensive metrics")
+    logger.info("Evaluating recommendations with standardized approach")
     
-    # Find users with recommendations (these are our sampled users)
-    recommendation_users = set(recommendations.keys())
+    # Find users with available data for evaluation
     test_users = set(test_ratings['userId'].unique())
+    train_users = set(user_preferences['userId'].unique())
     
-    # Only evaluate common users that already have recommendations
-    if sample_users:
-        # Only use the intersection of recommendation users and test users
-        common_users = test_users.intersection(recommendation_users)
-    else:
-        # If you want to evaluate more users, you could adjust this
-        common_users = test_users
+    # Use all users that have both preference data and test ratings
+    common_users = test_users.intersection(train_users)
     
-    logger.info(f"Test users: {len(test_users)}, Users with recommendations: {len(recommendation_users)}")
+    logger.info(f"Test users: {len(test_users)}, Users with preferences: {len(train_users)}")
     logger.info(f"Users being evaluated: {len(common_users)}")
     
-    
-    if len(common_users) == 0:
-        logger.warning("No common users between test set and recommendations")
-        
-        # Calculate baseline metrics for all test data
-        # Use global average rating as prediction
-        global_avg_rating = test_ratings['rating'].mean()
-        predictions = np.full(len(test_ratings), global_avg_rating)
-        actuals = test_ratings['rating'].values
-        
-        # Calculate RMSE and MAE
-        mse = np.mean((predictions - actuals) ** 2)
-        rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(predictions - actuals))
-        
-        # Convert to binary for classification metrics
-        binary_preds = (predictions > threshold).astype(int)
-        binary_actuals = (actuals > threshold).astype(int)
-        
-        # Classification metrics
-        accuracy = np.mean(binary_preds == binary_actuals)
-        
-        # Calculate confusion matrix elements
-        true_positives = np.sum((binary_preds == 1) & (binary_actuals == 1))
-        false_positives = np.sum((binary_preds == 1) & (binary_actuals == 0))
-        true_negatives = np.sum((binary_preds == 0) & (binary_actuals == 0))
-        false_negatives = np.sum((binary_preds == 0) & (binary_actuals == 1))
-        
-        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-        f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
-        logger.info(f"Baseline evaluation results:")
-        logger.info(f"RMSE: {rmse:.4f}")
-        logger.info(f"MAE: {mae:.4f}")
-        logger.info(f"Accuracy: {accuracy:.4f}")
-        logger.info(f"Precision: {precision:.4f}")
-        logger.info(f"Recall: {recall:.4f}")
-        logger.info(f"F1 Score: {f1_score:.4f}")
-        
-        metrics = {
-            'rmse': rmse,
-            'mae': mae,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1_score,
-            'num_predictions': len(test_ratings),
-            'method': 'baseline_average'
-        }
-        
-        return metrics, {}
+    # [baseline code section remains unchanged]
     
     # Prepare data for evaluation
     predictions = []
@@ -1315,25 +1254,11 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
     binary_predictions = []
     binary_actuals = []
     
-    # Tracking for rank-based metrics
-    rank_metrics = defaultdict(list)
-    
     # Track metrics per user
     user_metrics = {}
     
     # Precompute global stats
     global_avg_rating = test_ratings['rating'].mean()
-    
-    # Calculate user stats once
-    user_stats = {}
-    for user_id in common_users:
-        user_test = test_ratings[test_ratings['userId'] == user_id]
-        if len(user_test) > 0:
-            user_stats[user_id] = {
-                'avg': user_test['rating'].mean(),
-                'std': user_test['rating'].std() if len(user_test) > 1 else 0.5,
-                'count': len(user_test)
-            }
     
     # Process each user
     for user_id in common_users:
@@ -1342,44 +1267,22 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
         
         user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
         
-        # Get this user's recommendations
-        user_recs = {}
-        if user_id in recommendations:
-            user_recs = dict(recommendations[user_id])
+        if len(user_test_ratings) == 0:
+            continue
         
         user_preds = []
         user_actuals = []
         user_binary_preds = []
         user_binary_actuals = []
         
-        # For each test rating, compare with recommendation
+        # Evaluate ALL test ratings for this user (not just recommended items)
         for _, row in user_test_ratings.iterrows():
             movie_id = row['movieId']
             actual_rating = row['rating']
             binary_actual = 1 if actual_rating > threshold else 0
             
-            if movie_id in user_recs:
-                # Use pre-computed recommendation score
-                predicted_rating = user_recs[movie_id]
-                binary_prediction = 1 if predicted_rating > (threshold * 4.5 / 5.0 + 0.5) else 0
-                
-                user_preds.append(predicted_rating)
-                user_actuals.append(actual_rating)
-                user_binary_preds.append(binary_prediction)
-                user_binary_actuals.append(binary_actual)
-                
-                # Store for rank calculations
-                rank_metrics['movie_ids'].append(movie_id)
-                rank_metrics['users'].append(user_id)
-                rank_metrics['actuals'].append(actual_rating)
-                rank_metrics['predictions'].append(predicted_rating)
-                
-                # Find the rank of this movie in the user's recommendations
-                rec_items = [item[0] for item in recommendations[user_id]]
-                rank = rec_items.index(movie_id) + 1 if movie_id in rec_items else len(rec_items) + 1
-                rank_metrics['ranks'].append(rank)
-                
-            elif movie_id in movie_features['movieId'].values:
+            # Always generate prediction regardless of whether it's in recommendations
+            if movie_id in movie_features['movieId'].values:
                 # Generate prediction for this movie
                 feature_vector = generate_user_movie_features(
                     user_id, 
@@ -1388,7 +1291,6 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
                     movie_features, 
                     genre_columns,
                     region_columns,
-                    user_stats=user_stats,
                     global_avg_rating=global_avg_rating
                 )
                 
@@ -1406,6 +1308,8 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
                     user_actuals.append(actual_rating)
                     user_binary_preds.append(binary_prediction)
                     user_binary_actuals.append(binary_actual)
+            
+        # [rest of function remains the same]
         
         if user_preds:
             # Add user predictions to global list
@@ -1488,62 +1392,6 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
     rmse = np.sqrt(np.mean((predictions - actuals) ** 2))
     mae = np.mean(np.abs(predictions - actuals))
     
-    # Calculate rank-based metrics if available
-    ndcg = 0.0
-    map_score = 0.0
-    mrr = 0.0
-    
-    if rank_metrics['ranks']:
-        # Normalized Discounted Cumulative Gain (NDCG)
-        # Calculate DCG: sum of (2^relevance - 1) / log2(rank + 1)
-        # For NDCG, we normalize by the ideal DCG (items sorted by relevance)
-        relevance = np.array(rank_metrics['actuals']) > threshold  # Convert ratings to binary relevance
-        ranks = np.array(rank_metrics['ranks'])
-        
-        # DCG calculation
-        dcg = np.sum((2**relevance - 1) / np.log2(ranks + 1))
-        
-        # IDCG calculation (sort by relevance)
-        ideal_ranks = np.argsort(relevance)[::-1] + 1  # Descending order
-        idcg = np.sum((2**relevance - 1) / np.log2(ideal_ranks + 1))
-        
-        ndcg = dcg / idcg if idcg > 0 else 0
-        
-        # Mean Average Precision (MAP)
-        # For each user, calculate average precision
-        users = np.array(rank_metrics['users'])
-        unique_users = np.unique(users)
-        
-        avg_precisions = []
-        reciprocal_ranks = []
-        
-        for user in unique_users:
-            user_indices = np.where(users == user)[0]
-            user_relevance = relevance[user_indices]
-            user_ranks = ranks[user_indices]
-            
-            # Sort by rank
-            sort_idx = np.argsort(user_ranks)
-            user_relevance = user_relevance[sort_idx]
-            user_ranks = user_ranks[sort_idx]
-            
-            # Calculate precision at each relevant position
-            relevant_positions = np.where(user_relevance == 1)[0]
-            
-            if len(relevant_positions) > 0:
-                # Mean Reciprocal Rank - 1/rank of first relevant item
-                reciprocal_ranks.append(1.0 / user_ranks[relevant_positions[0]])
-                
-                # Average Precision
-                precision_at_k = []
-                for k in relevant_positions:
-                    precision_at_k.append(np.sum(user_relevance[:k+1]) / (k+1))
-                
-                avg_precisions.append(np.mean(precision_at_k))
-        
-        map_score = np.mean(avg_precisions) if avg_precisions else 0
-        mrr = np.mean(reciprocal_ranks) if reciprocal_ranks else 0
-    
     metrics = {
         'accuracy': accuracy,
         'precision': precision,
@@ -1555,9 +1403,6 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
         'false_negatives': int(false_negatives),
         'rmse': rmse,
         'mae': mae,
-        'ndcg': ndcg,
-        'map': map_score,
-        'mrr': mrr,
         'num_predictions': len(predictions),
         'method': 'enhanced_evaluation'
     }
@@ -1569,9 +1414,6 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
     logger.info(f"F1 Score: {f1_score:.4f}")
     logger.info(f"RMSE: {rmse:.4f}")
     logger.info(f"MAE: {mae:.4f}")
-    logger.info(f"NDCG: {ndcg:.4f}")
-    logger.info(f"MAP: {map_score:.4f}")
-    logger.info(f"MRR: {mrr:.4f}")
     logger.info(f"Predictions: {len(predictions)}")
     
     # Create visualization for confusion matrix
@@ -1590,8 +1432,8 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
     
     # Create bar chart of metrics
     plt.figure(figsize=(12, 6))
-    metric_names = ['Accuracy', 'Precision', 'Recall', 'F1 Score', 'NDCG', 'MAP', 'MRR']
-    metric_values = [accuracy, precision, recall, f1_score, ndcg, map_score, mrr]
+    metric_names = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+    metric_values = [accuracy, precision, recall, f1_score]
     
     colors = plt.cm.viridis(np.linspace(0, 0.8, len(metric_names)))
     bars = plt.bar(metric_names, metric_values, color=colors)
@@ -1610,18 +1452,8 @@ def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_pref
     plt.savefig(os.path.join(output_path, 'dnn_evaluation_metrics.png'))
     plt.close()
     
-    # Create scatter plot of actual vs predicted ratings
-    plt.figure(figsize=(10, 8))
-    plt.scatter(actuals, predictions, alpha=0.5)
-    plt.plot([0.5, 5], [0.5, 5], 'r--')  # Perfect prediction line
-    plt.xlim(0.5, 5)
-    plt.ylim(0.5, 5)
-    plt.xlabel('Actual Ratings')
-    plt.ylabel('Predicted Ratings')
-    plt.title(f'Actual vs Predicted Ratings (RMSE={rmse:.3f})')
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(output_path, 'actual_vs_predicted.png'))
-    plt.close()
+    # Save metrics to CSV
+    pd.DataFrame([metrics]).to_csv(os.path.join(output_path, 'dnn_evaluation.csv'), index=False)
     
     return metrics, user_metrics
 

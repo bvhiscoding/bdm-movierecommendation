@@ -624,10 +624,9 @@ def generate_recommendations_for_all_users(user_movie_similarities, train_rating
 
 def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings, batch_size=100, rating_threshold=3.5):
     """
-    Evaluate recommendation model using RMSE, MAE, and classification metrics.
-    Added precision, recall, F1, and accuracy calculations.
+    Evaluate recommendation model using standardized metrics: RMSE, MAE, Accuracy, Precision, Recall, F1-score.
     """
-    print("Evaluating recommendation model using enhanced metrics with batching...")
+    print("Evaluating recommendation model using standardized metrics...")
     start_time = time.time()
     
     # Initialize metrics
@@ -829,6 +828,45 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
         'num_users_evaluated': users_evaluated,
         'num_predictions': total_predictions
     }
+    
+    # Save evaluation results
+    pd.DataFrame([metrics]).to_csv(os.path.join(output_path, 'content_based_evaluation.csv'), index=False)
+    
+    # Create visualization for confusion matrix
+    plt.figure(figsize=(10, 8))
+    cm = np.array([
+        [true_negatives, false_positives],
+        [false_negatives, true_positives]
+    ])
+    
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+               xticklabels=['Predicted Negative', 'Predicted Positive'],
+               yticklabels=['Actual Negative', 'Actual Positive'])
+    plt.title('Confusion Matrix')
+    plt.savefig(os.path.join(output_path, 'confusion_matrix.png'))
+    plt.close()
+    
+    # Create bar chart of metrics
+    plt.figure(figsize=(12, 6))
+    metric_names = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+    metric_values = [accuracy, precision, recall, f1]
+    
+    colors = plt.cm.viridis(np.linspace(0, 0.8, len(metric_names)))
+    bars = plt.bar(metric_names, metric_values, color=colors)
+    
+    # Add value labels on top of bars
+    for bar, value in zip(bars, metric_values):
+        plt.text(bar.get_x() + bar.get_width()/2, 
+                bar.get_height() + 0.02, 
+                f'{value:.3f}', 
+                ha='center', va='bottom', 
+                fontweight='bold')
+    
+    plt.ylim(0, 1.0)
+    plt.title('Classification Metrics')
+    plt.grid(axis='y', alpha=0.3)
+    plt.savefig(os.path.join(output_path, 'classification_metrics.png'))
+    plt.close()
     
     return metrics
 
