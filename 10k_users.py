@@ -19,7 +19,7 @@ ratings_df = pd.read_csv(f"{input_path}rating.csv")
 
 # Define user ID range to extract (1-10)
 min_user_id = 1
-max_user_id = 1000
+max_user_id = 100000
 
 print(f"Filtering for users with IDs from {min_user_id} to {max_user_id}...")
 

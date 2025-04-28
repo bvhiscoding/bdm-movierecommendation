@@ -625,6 +625,7 @@ def generate_recommendations_for_all_users(user_movie_similarities, train_rating
 def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings, batch_size=100, rating_threshold=3.5):
     """
     Evaluate recommendation model using standardized metrics: RMSE, MAE, Accuracy, Precision, Recall, F1-score.
+    Modified to ensure consistent prediction counting with st2_p2.py
     """
     print("Evaluating recommendation model using standardized metrics...")
     start_time = time.time()
@@ -654,11 +655,12 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
             user_avg = user_ratings['rating'].mean()
             user_bias_dict[user_id] = user_avg - global_avg_rating
     
-    # Find common users between training and test sets that have similarity data
+    # Find common users between test set and training set (matching st2_p2.py approach)
     test_users = set(test_ratings['userId'].unique())
     train_users = set(train_ratings['userId'].unique())
     similarity_users = set(user_movie_similarities.keys())
     
+    # Use intersection of all three sets to ensure we have necessary data for each user
     common_users = test_users.intersection(train_users).intersection(similarity_users)
     
     logger.info(f"Train users: {len(train_users)}, Test users: {len(test_users)}, Similarity users: {len(similarity_users)}")
@@ -704,6 +706,15 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
             'num_predictions': len(test_ratings)
         }
     
+    # Get available movie IDs from train data to match st2_p2 behavior
+    available_movie_ids = set(train_ratings['movieId'].unique())
+    
+    # Store predictions for later use in calculating metrics
+    all_predictions = []
+    all_actuals = []
+    all_binary_preds = []
+    all_binary_actuals = []
+    
     # Process common users in batches
     user_list = list(common_users)
     for batch_start in range(0, len(user_list), batch_size):
@@ -713,13 +724,7 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
         logger.info(f"Evaluating batch {batch_start//batch_size + 1}: users {batch_start+1}-{batch_end} of {len(user_list)}")
         batch_start_time = time.time()
         
-        batch_squared_errors = 0
-        batch_absolute_errors = 0
         batch_predictions = 0
-        batch_true_positives = 0
-        batch_false_positives = 0
-        batch_true_negatives = 0
-        batch_false_negatives = 0
         
         for user_id in batch_users:
             user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
@@ -727,45 +732,44 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
             if len(user_test_ratings) == 0:
                 continue
             
+            user_preds = []
+            user_actuals = []
+            user_binary_preds = []
+            user_binary_actuals = []
+            
             for _, row in user_test_ratings.iterrows():
                 movie_id = row['movieId']
                 true_rating = row['rating']
                 
+                # Only predict for movies that exist in our available movie set
+                # This matches the behavior in st2_p2.py
+                if movie_id not in available_movie_ids:
+                    continue
+                
                 # Make prediction
                 predicted_rating = predict_rating(user_id, movie_id, user_movie_similarities, train_ratings, user_bias_dict)
                 
-                # Calculate error
-                squared_error = (predicted_rating - true_rating) ** 2
-                absolute_error = abs(predicted_rating - true_rating)
+                # Add to user-level lists
+                user_preds.append(predicted_rating)
+                user_actuals.append(true_rating)
                 
-                # Classification metrics
+                # Binary classification
                 binary_prediction = 1 if predicted_rating > rating_threshold else 0
                 binary_actual = 1 if true_rating > rating_threshold else 0
                 
-                if binary_prediction == 1 and binary_actual == 1:
-                    batch_true_positives += 1
-                elif binary_prediction == 1 and binary_actual == 0:
-                    batch_false_positives += 1
-                elif binary_prediction == 0 and binary_actual == 0:
-                    batch_true_negatives += 1
-                elif binary_prediction == 0 and binary_actual == 1:
-                    batch_false_negatives += 1
+                user_binary_preds.append(binary_prediction)
+                user_binary_actuals.append(binary_actual)
                 
-                # Accumulate errors
-                batch_squared_errors += squared_error
-                batch_absolute_errors += absolute_error
+                # Add to global lists
+                all_predictions.append(predicted_rating)
+                all_actuals.append(true_rating)
+                all_binary_preds.append(binary_prediction)
+                all_binary_actuals.append(binary_actual)
+                
                 batch_predictions += 1
             
-            users_evaluated += 1
-        
-        # Accumulate batch results
-        squared_errors_sum += batch_squared_errors
-        absolute_errors_sum += batch_absolute_errors
-        total_predictions += batch_predictions
-        true_positives += batch_true_positives
-        false_positives += batch_false_positives
-        true_negatives += batch_true_negatives
-        false_negatives += batch_false_negatives
+            if user_preds:
+                users_evaluated += 1
         
         batch_time = time.time() - batch_start_time
         elapsed = time.time() - start_time
@@ -773,28 +777,37 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
         remaining = batch_time * ((len(user_list) - batch_end) / len(batch_users)) if batch_end < len(user_list) else 0
         
         if batch_predictions > 0:
-            batch_rmse = np.sqrt(batch_squared_errors / batch_predictions)
-            batch_mae = batch_absolute_errors / batch_predictions
-            batch_accuracy = (batch_true_positives + batch_true_negatives) / batch_predictions
-            
-            logger.info(f"Batch metrics - RMSE: {batch_rmse:.4f}, MAE: {batch_mae:.4f}, Accuracy: {batch_accuracy:.4f}")
-            logger.info(f"TP: {batch_true_positives}, FP: {batch_false_positives}, TN: {batch_true_negatives}, FN: {batch_false_negatives}")
-        
-        logger.info(f"Processed {batch_end}/{len(user_list)} users ({progress:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+            logger.info(f"Batch predictions: {batch_predictions}")
+            logger.info(f"Processed {batch_end}/{len(user_list)} users ({progress:.1f}%) - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
         
         # Garbage collection
         gc.collect()
     
-    # Calculate final metrics
-    if total_predictions > 0:
-        rmse = np.sqrt(squared_errors_sum / total_predictions)
-        mae = absolute_errors_sum / total_predictions
+    # Convert to numpy arrays for efficient computation
+    if all_predictions:
+        all_predictions = np.array(all_predictions)
+        all_actuals = np.array(all_actuals)
+        all_binary_preds = np.array(all_binary_preds)
+        all_binary_actuals = np.array(all_binary_actuals)
         
-        # Classification metrics
-        accuracy = (true_positives + true_negatives) / total_predictions
+        # Calculate regression metrics
+        rmse = np.sqrt(np.mean((all_predictions - all_actuals) ** 2))
+        mae = np.mean(np.abs(all_predictions - all_actuals))
+        
+        # Calculate classification metrics
+        accuracy = np.mean(all_binary_preds == all_binary_actuals)
+        
+        true_positives = np.sum((all_binary_preds == 1) & (all_binary_actuals == 1))
+        false_positives = np.sum((all_binary_preds == 1) & (all_binary_actuals == 0))
+        true_negatives = np.sum((all_binary_preds == 0) & (all_binary_actuals == 0))
+        false_negatives = np.sum((all_binary_preds == 0) & (all_binary_actuals == 1))
+        
         precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
         recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # Set total predictions
+        total_predictions = len(all_predictions)
     else:
         rmse = 0.0
         mae = 0.0
@@ -802,6 +815,7 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
         precision = 0.0
         recall = 0.0
         f1 = 0.0
+        total_predictions = 0
     
     logger.info("\nEvaluation results:")
     logger.info(f"Users evaluated: {users_evaluated}")
@@ -821,10 +835,10 @@ def evaluate_with_rmse_mae(user_movie_similarities, train_ratings, test_ratings,
         'precision': precision,
         'recall': recall,
         'f1_score': f1,
-        'true_positives': true_positives,
-        'false_positives': false_positives,
-        'true_negatives': true_negatives,
-        'false_negatives': false_negatives,
+        'true_positives': int(true_positives),
+        'false_positives': int(false_positives),
+        'true_negatives': int(true_negatives),
+        'false_negatives': int(false_negatives),
         'num_users_evaluated': users_evaluated,
         'num_predictions': total_predictions
     }

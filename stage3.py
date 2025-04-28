@@ -69,10 +69,10 @@ class HybridRecommender:
         
         # Map rating count to appropriate alpha
         alpha_mapping = [
-            (10, 0.2),     # Users with <= 10 ratings: heavy weight on collaborative (0.2)
-            (25, 0.3),     # Users with 11-25 ratings: more weight on collaborative (0.3)
-            (50, 0.5),     # Users with 26-50 ratings: balanced (0.5) 
-            (100, 0.7),    # Users with 51-100 ratings: more weight on content-based (0.7)
+            (25, 0.2),     # Users with <= 10 ratings: heavy weight on collaborative (0.2)
+            (50, 0.3),     # Users with 11-25 ratings: more weight on collaborative (0.3)
+            (150, 0.5),     # Users with 26-50 ratings: balanced (0.5) 
+            (200, 0.7),    # Users with 51-100 ratings: more weight on content-based (0.7)
             (float('inf'), 0.8)  # Users with >100 ratings: heavy weight on content-based (0.8)
         ]
         
@@ -397,7 +397,7 @@ class HybridRecommender:
                 # Track alpha statistics
                 alpha_stats['values'].append(alpha)
                 rating_count = len(self.data['train_ratings'][self.data['train_ratings']['userId'] == user_id])
-                count_category = "<=10" if rating_count <= 25 else "11-25" if rating_count <= 50 else "26-50" if rating_count <= 100 else "51-100" if rating_count <= 150 else ">100"
+                count_category = "<=10" if rating_count <= 25 else "11-25" if rating_count <= 50 else "26-50" if rating_count <= 150 else "51-100" if rating_count <= 200 else ">100"
                 if count_category in alpha_stats['count_categories']:
                     alpha_stats['count_categories'][count_category]['count'] += 1
                     alpha_stats['count_categories'][count_category]['alpha_sum'] += alpha
@@ -700,7 +700,7 @@ class HybridRecommender:
                 user_df['rating_count_range'] = pd.cut(
                     user_df['rating_count'], 
                     bins=[0, 25, 50, 100, 150, float('inf')],
-                    labels=['<=10', '11-25', '26-50', '51-100', '>100']
+                    labels=['<=25', '26-50', '51-150', '151-200', '>200']
                 )
                 
                 # Calculate average performance by rating count
@@ -1451,13 +1451,13 @@ def main():
                     print(f"- Rating range: {user_stats['min_rating']:.1f} - {user_stats['max_rating']:.1f} (avg: {user_stats['avg_rating']:.2f})")
                     
                     # Determine user category based on rating count
-                    if user_stats['rating_count'] <= 10:
+                    if user_stats['rating_count'] <= 25:
                         user_category = "New user"
-                    elif user_stats['rating_count'] <= 25:
-                        user_category = "Casual user"
                     elif user_stats['rating_count'] <= 50:
+                        user_category = "Casual user"
+                    elif user_stats['rating_count'] <= 150 :
                         user_category = "Regular user"
-                    elif user_stats['rating_count'] <= 100:
+                    elif user_stats['rating_count'] <= 200:
                         user_category = "Active user"
                     else:
                         user_category = "Power user"
