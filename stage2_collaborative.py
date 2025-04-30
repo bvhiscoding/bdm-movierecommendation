@@ -750,7 +750,16 @@ final_val_rmse = np.sqrt(final_val_loss)
 print(f"\nFinal RMSE:")
 print(f"- Training RMSE: {final_train_rmse:.4f}")
 print(f"- Validation RMSE: {final_val_rmse:.4f}")
-
+# Save evaluation metrics to CSV
+evaluation_metrics = {
+    'rmse': final_val_rmse,
+    'mae': final_val_mae,
+    'num_predictions': len(X_val),
+    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+}
+metrics_df = pd.DataFrame([evaluation_metrics])
+metrics_df.to_csv(os.path.join(output_path, 'dnn_evaluation.csv'), index=False)
+print(f"Evaluation metrics saved to {os.path.join(output_path, 'dnn_evaluation.csv')}")
 # Analyze prediction quality
 print("\nPrediction Quality Analysis:")
 val_predictions = dnn_model.predict(X_val)

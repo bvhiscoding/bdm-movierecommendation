@@ -31,7 +31,7 @@ print("="*80)
 # Set paths
 input_path = "./"  # Current directory where stage1.py saved the files
 output_path = "./rec/content-recommendations"
-top_n = 20
+top_n =50
 
 # Create output directory if it doesn't exist
 if not os.path.exists(output_path):
@@ -45,8 +45,8 @@ if not os.path.exists(output_path):
 # lemmatizer = WordNetLemmatizer()
 
 # Model parameters/
-similarity_threshold = 0.3  # Minimum similarity to consider
-word2vec_dim = 100  # Dimensionality of Word2Vec embeddings
+similarity_threshold = 0.8  # Minimum similarity to consider
+word2vec_dim = 200  # Dimensionality of Word2Vec embeddings
 
 print("\n" + "="*80)
 print("STEP 1: DATA LOADING")
@@ -105,48 +105,22 @@ def load_data():
         sys.exit(1)
     
     # Create training and testing sets with 80-20 split
+    # Create training and testing sets with 80-20 split
     if 'ratings' in data:
-        # Sort by timestamp if available to ensure reproducibility
-        if 'timestamp' in data['ratings'].columns:
-            data['ratings'] = data['ratings'].sort_values('timestamp')
+        print("Splitting ratings into training and testing sets...")
         
-        # Group by user to ensure each user has both training and testing data
-        user_groups = data['ratings'].groupby('userId')
-        train_chunks = []
-        test_chunks = []
+        # Import train_test_split if not already imported
+        from sklearn.model_selection import train_test_split
         
-        user_count = 0
-        total_users = len(user_groups)
+        # Split ratings into training and testing sets
+        train_ratings, test_ratings = train_test_split(
+            data['ratings'], 
+            test_size=0.2
+        )
         
-        for user_id, group in user_groups:
-            n = len(group)
-            split_idx = int(n * 0.8)
-            train_chunks.append(group.iloc[:split_idx])
-            test_chunks.append(group.iloc[split_idx:])
-            
-            user_count += 1
-            # Process in batches to avoid excessive memory usage
-            if len(train_chunks) >= 1000 or user_count == total_users:
-                gc.collect()  # Force garbage collection
-        
-        # Get all unique user IDs
-        all_user_ids = data['ratings']['userId'].unique()
-
-        # Split users into train (80%) and test (20%) sets
-        np.random.seed(42)  # For reproducibility
-        np.random.shuffle(all_user_ids)
-
-        split_idx = int(len(all_user_ids) * 0.8)
-        train_users = all_user_ids[:split_idx]
-        test_users = all_user_ids[split_idx:]
-
-        # Split ratings based on user assignments
-        data['train_ratings'] = data['ratings'][data['ratings']['userId'].isin(train_users)]
-        data['test_ratings'] = data['ratings'][data['ratings']['userId'].isin(test_users)]
-        
-        # Free memory
-        del train_chunks, test_chunks
-        gc.collect()
+        # Store the split data
+        data['train_ratings'] = train_ratings
+        data['test_ratings'] = test_ratings
         
         print(f"\nSplit ratings into {len(data['train_ratings'])} training and {len(data['test_ratings'])} testing samples")
         print(f"Training set covers {data['train_ratings']['userId'].nunique()} users and {data['train_ratings']['movieId'].nunique()} movies")
@@ -675,7 +649,7 @@ print("\n" + "="*80)
 print("STEP 7: USER-MOVIE SIMILARITY CALCULATION")
 print("="*80)
 
-def calculate_user_movie_similarity(user_vectors, movie_vectors, threshold=0.3, batch_size=50):
+def calculate_user_movie_similarity(user_vectors, movie_vectors, threshold=0.8, batch_size=50):
     """Calculate similarity between users and movies in batches"""
     print(f"Calculating user-movie similarity with threshold {threshold} in batches...")
     start_time = time.time()
