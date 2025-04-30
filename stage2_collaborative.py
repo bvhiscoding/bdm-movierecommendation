@@ -938,7 +938,8 @@ def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, mov
 
 def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, movie_genre_features, ratings, n=10, batch_size=50, max_users=None):
     """
-    Generate recommendations for all users using the DNN model with improved batching
+    Generate recommendations for all users using the DNN model with optimized batching
+    and vectorization for improved performance.
     
     Input:
       - dnn_model: Trained DNN model
@@ -970,15 +971,44 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     # Create a lookup dictionary for user ratings to avoid repeated filtering
     print("Creating user rating lookup dictionary...")
     user_rated_movies = {}
-    for _, row in ratings.iterrows():
-        user_id = row['userId']
-        movie_id = row['movieId']
-        if user_id not in user_rated_movies:
-            user_rated_movies[user_id] = set()
-        user_rated_movies[user_id].add(movie_id)
+    # Process ratings in chunks to save memory
+    chunk_size = 100000
+    for chunk_start in range(0, len(ratings), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(ratings))
+        ratings_chunk = ratings.iloc[chunk_start:chunk_end]
+        
+        for _, row in ratings_chunk.iterrows():
+            user_id = row['userId']
+            movie_id = row['movieId']
+            if user_id not in user_rated_movies:
+                user_rated_movies[user_id] = set()
+            user_rated_movies[user_id].add(movie_id)
+        
+        # Log progress for large datasets
+        if chunk_size < len(ratings):
+            print(f"Processed {chunk_end}/{len(ratings)} ratings for lookup dictionary")
     
     # Get genre columns
     genre_columns = [col for col in movie_genre_features.columns if col != 'movieId']
+    
+    # Pre-compute movie arrays for faster feature vector creation
+    print("Pre-computing movie feature arrays...")
+    movie_arrays = {}
+    for _, movie_row in movie_genre_features.iterrows():
+        movie_id = movie_row['movieId']
+        movie_array = np.array([movie_row[genre] for genre in genre_columns], dtype=np.float32)
+        movie_arrays[movie_id] = movie_array
+    
+    # Prefilter movies to improve recommendation speed
+    # We'll create movie clusters based on genres to limit the search space
+    print("Creating genre-based movie clusters for faster recommendations...")
+    genre_to_movies = {genre: [] for genre in genre_columns}
+    
+    for _, movie_row in movie_genre_features.iterrows():
+        movie_id = movie_row['movieId']
+        for genre in genre_columns:
+            if movie_row[genre] == 1:
+                genre_to_movies[genre].append(movie_id)
     
     # Process users in batches
     start_time = time.time()
@@ -992,66 +1022,75 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
         # Process each user in the batch
         for user_idx, user_id in enumerate(batch_users):
             # Skip if user not found in genre preferences
-            user_prefs = user_genre_preferences[user_genre_preferences['userId'] == user_id]
-            if user_prefs.empty:
+            user_prefs_df = user_genre_preferences[user_genre_preferences['userId'] == user_id]
+            if user_prefs_df.empty:
                 continue
+            
+            user_prefs = user_prefs_df.iloc[0]
             
             # Get movies already rated by the user
             rated_movies = user_rated_movies.get(user_id, set())
             
-            # Get candidate movies (not yet rated by the user)
-            # To improve efficiency, we'll use a modified approach:
-            # 1. Get all unrated movies
-            unrated_movie_ids = set(movie_genre_features['movieId']) - rated_movies
+            # OPTIMIZATION: Use genre preferences to get candidate movies
+            # Find the user's top genres (both positive and negative preferences)
+            user_genre_scores = [(genre, abs(user_prefs[genre])) for genre in genre_columns]
+            # Sort by absolute preference value (higher = stronger opinion)
+            user_genre_scores.sort(key=lambda x: x[1], reverse=True)
             
-            # If too many, limit to a manageable number to improve performance
-            max_movies_per_batch = 1000
-            if len(unrated_movie_ids) > max_movies_per_batch:
-                # Convert to list so we can slice it
-                unrated_movie_ids = list(unrated_movie_ids)[:max_movies_per_batch]
+            # Get candidate movies from the user's top genres (positive or negative)
+            # This dramatically reduces the number of movies to process
+            candidate_movie_ids = set()
+            for genre, score in user_genre_scores[:5]:  # Use top 5 most opinionated genres
+                if user_prefs[genre] > 0:  # User likes this genre
+                    candidate_movie_ids.update(genre_to_movies[genre])
             
-            # Get movie features for unrated movies
-            candidate_movies = movie_genre_features[movie_genre_features['movieId'].isin(unrated_movie_ids)]
+            # If we don't have enough candidates, add more from other genres
+            if len(candidate_movie_ids) < n * 10:  # Aim for at least 10x the required recommendations
+                for genre, _ in user_genre_scores[5:10]:  # Add from next 5 genres
+                    candidate_movie_ids.update(genre_to_movies[genre])
             
-            # If no candidates, skip this user
-            if len(candidate_movies) == 0:
-                continue
+            # Remove already rated movies
+            candidate_movie_ids = candidate_movie_ids - rated_movies
             
-            # Process candidates in smaller batches to avoid memory issues
-            movie_batch_size = 200  # Adjust based on memory constraints
+            # Convert to list for batch processing
+            candidate_movie_ids = list(candidate_movie_ids)
+            
+            # If still too many, randomly sample to improve performance
+            max_candidates = 2000  # Balance between coverage and performance
+            if len(candidate_movie_ids) > max_candidates:
+                np.random.seed(42 + user_id)  # For reproducibility with a unique seed per user
+                candidate_movie_ids = np.random.choice(candidate_movie_ids, max_candidates, replace=False).tolist()
+            
+            # Process candidates in smaller batches for memory efficiency
+            movie_batch_size = 500  # Larger batches for faster prediction
             predictions = []
             
-            for j in range(0, len(candidate_movies), movie_batch_size):
-                movie_batch_end = min(j + movie_batch_size, len(candidate_movies))
-                movie_batch = candidate_movies.iloc[j:movie_batch_end]
+            # OPTIMIZATION: Vectorized batch processing
+            for j in range(0, len(candidate_movie_ids), movie_batch_size):
+                batch_end_idx = min(j + movie_batch_size, len(candidate_movie_ids))
+                batch_movie_ids = candidate_movie_ids[j:batch_end_idx]
                 
-                # Create feature vectors for all movies in this batch
-                batch_features = []
-                batch_movie_ids = []
+                # Pre-allocate the feature matrix for the entire batch
+                batch_features = np.zeros((len(batch_movie_ids), len(genre_columns) * 2), dtype=np.float32)
                 
-                for _, movie_row in movie_batch.iterrows():
-                    movie_id = movie_row['movieId']
-                    feature_vector = []
+                # Build the feature matrix efficiently
+                for k, movie_id in enumerate(batch_movie_ids):
+                    # Get the precomputed movie array
+                    movie_array = movie_arrays.get(movie_id)
+                    if movie_array is None:
+                        continue
                     
-                    for genre in genre_columns:
-                        # User preference for this genre
-                        feature_vector.append(user_prefs.iloc[0][genre])
-                        # Movie genre indicator
-                        feature_vector.append(movie_row[genre])
+                    # Extract user preferences as array for vectorized operations
+                    user_array = np.array([user_prefs[genre] for genre in genre_columns], dtype=np.float32)
                     
-                    batch_features.append(feature_vector)
-                    batch_movie_ids.append(movie_id)
+                    # Interleave user preferences and movie genres
+                    batch_features[k, 0::2] = user_array  # User preferences at even indices
+                    batch_features[k, 1::2] = movie_array  # Movie features at odd indices
                 
-                # Convert to numpy array
-                batch_features = np.array(batch_features, dtype=np.float32)
-                
-                # Skip if empty
-                if len(batch_features) == 0:
-                    continue
-                
-                # Make predictions in batch
+                # Make predictions efficiently in a single batch
                 try:
-                    batch_predictions = dnn_model.predict(batch_features, verbose=0).flatten()
+                    # Use a lower verbosity and larger batch size for prediction
+                    batch_predictions = dnn_model.predict(batch_features, verbose=0, batch_size=128).flatten()
                     
                     # Ensure ratings are within bounds
                     batch_predictions = np.clip(batch_predictions, 0.5, 5.0)
@@ -1062,29 +1101,49 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
                 except Exception as e:
                     print(f"Error making predictions for user {user_id}, batch {j}: {e}")
             
-            # Sort predictions by rating and take top n
-            predictions.sort(key=lambda x: x[1], reverse=True)
-            all_recommendations[user_id] = predictions[:n]
+            # OPTIMIZATION: Use numpy for faster sorting
+            if predictions:
+                # Convert to numpy arrays for faster operations
+                movie_ids = np.array([p[0] for p in predictions])
+                pred_ratings = np.array([p[1] for p in predictions])
+                
+                # Get indices of top n predictions
+                if len(pred_ratings) > n:
+                    top_indices = np.argpartition(pred_ratings, -n)[-n:]
+                    # Sort the top n by rating (descending)
+                    top_indices = top_indices[np.argsort(-pred_ratings[top_indices])]
+                else:
+                    # If we have fewer than n predictions, sort all
+                    top_indices = np.argsort(-pred_ratings)
+                
+                # Create the final recommendations list
+                user_recommendations = [(int(movie_ids[i]), float(pred_ratings[i])) for i in top_indices]
+                all_recommendations[user_id] = user_recommendations
             
-            # Log progress for every 10th user or the last one
+            # Log progress periodically
             if (user_idx + 1) % 10 == 0 or user_idx == len(batch_users) - 1:
                 elapsed_batch = time.time() - batch_start_time
                 avg_time_per_user = elapsed_batch / (user_idx + 1)
-                print(f"  Processed {user_idx + 1}/{len(batch_users)} users in batch, avg time: {avg_time_per_user:.2f}s per user")
+                remaining_in_batch = (len(batch_users) - (user_idx + 1)) * avg_time_per_user
+                print(f"  Processed {user_idx + 1}/{len(batch_users)} users in batch, " 
+                      f"avg: {avg_time_per_user:.2f}s/user, remaining in batch: {remaining_in_batch:.2f}s")
         
-        # Log batch completion
+        # Log batch completion with detailed timing
         elapsed = time.time() - start_time
-        avg_time_per_batch = elapsed / ((batch_end - i) / batch_size)
+        batch_time = time.time() - batch_start_time
+        avg_time_per_batch = batch_time
         progress = batch_end / total_users * 100
-        remaining = avg_time_per_batch * ((total_users - batch_end) / batch_size) if batch_end < total_users else 0
+        remaining_batches = (total_users - batch_end) / batch_size
+        remaining = avg_time_per_batch * remaining_batches if batch_end < total_users else 0
         
         print(f"Completed batch {i//batch_size + 1}/{(total_users-1)//batch_size + 1}")
-        print(f"Progress: {progress:.1f}% - Elapsed: {elapsed:.2f}s - Est. remaining: {remaining:.2f}s")
+        print(f"Progress: {progress:.1f}% - Elapsed: {elapsed:.2f}s - Batch time: {batch_time:.2f}s - Est. remaining: {remaining:.2f}s")
+        print(f"Users with recommendations so far: {len(all_recommendations)}")
         
-        # Force garbage collection
+        # OPTIMIZATION: Aggressive garbage collection between batches
         gc.collect()
     
-    print(f"Generated recommendations for {len(all_recommendations)} users")
+    print(f"Generated recommendations for {len(all_recommendations)} users in {time.time() - start_time:.2f}s")
     return all_recommendations
 
 # Generate DNN recommendations for all users (limiting to a reasonable number for demonstration)
