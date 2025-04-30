@@ -74,25 +74,6 @@ def load_data():
         print(f"Normalized ratings not found at {ratings_path}")
         return None
     
-    # Create training and testing sets with 80-20 split
-    if 'ratings' in data:
-        # Get all unique user IDs
-        all_user_ids = data['ratings']['userId'].unique()
-
-        # Split users into train (80%) and test (20%) sets
-        np.random.seed(42)  # For reproducibility
-        np.random.shuffle(all_user_ids)
-
-        split_idx = int(len(all_user_ids) * 0.8)
-        train_users = all_user_ids[:split_idx]
-        test_users = all_user_ids[split_idx:]
-
-        # Split ratings based on user assignments
-        data['train_ratings'] = data['ratings'][data['ratings']['userId'].isin(train_users)]
-        data['test_ratings'] = data['ratings'][data['ratings']['userId'].isin(test_users)]
-        
-        print(f"Split ratings into {len(data['train_ratings'])} training and {len(data['test_ratings'])} testing samples")
-    
     return data
 
 # Load the data
@@ -141,21 +122,12 @@ if 'ratings' in data:
     print(f"\nRating distribution plot saved to {os.path.join(output_path, 'rating_distribution.png')}")
     plt.close()
 
-# Show train/test split summary
-if 'train_ratings' in data and 'test_ratings' in data:
-    print(f"\nTrain/Test Split Summary:")
-    print(f"- Training ratings: {len(data['train_ratings'])} ({len(data['train_ratings'])/len(data['ratings'])*100:.1f}%)")
-    print(f"- Testing ratings: {len(data['test_ratings'])} ({len(data['test_ratings'])/len(data['ratings'])*100:.1f}%)")
-    print(f"- Training users: {data['train_ratings']['userId'].nunique()}")
-    print(f"- Testing users: {data['test_ratings']['userId'].nunique()}")
-    
-    # Analyze user rating distribution in train/test sets
-    train_ratings_per_user = data['train_ratings'].groupby('userId').size()
-    test_ratings_per_user = data['test_ratings'].groupby('userId').size()
-    
-    print(f"\nRatings per user:")
-    print(f"- Training set - Avg: {train_ratings_per_user.mean():.2f}, Min: {train_ratings_per_user.min()}, Max: {train_ratings_per_user.max()}")
-    print(f"- Testing set - Avg: {test_ratings_per_user.mean():.2f}, Min: {test_ratings_per_user.min()}, Max: {test_ratings_per_user.max()}")
+# Analyze user rating distribution
+ratings_per_user = data['ratings'].groupby('userId').size()
+
+print(f"\nRatings per user:")
+print(f"- Average: {ratings_per_user.mean():.2f}")
+print(f"- Min: {ratings_per_user.min()}, Max: {ratings_per_user.max()}")
 
 print("\n" + "="*80)
 print("STEP 2: MOVIE GENRE FEATURE EXTRACTION")
@@ -264,12 +236,12 @@ print("\n" + "="*80)
 print("STEP 3: USER GENRE PREFERENCE CALCULATION")
 print("="*80)
 
-def calculate_user_genre_preferences(train_ratings, movie_genre_features):
+def calculate_user_genre_preferences(ratings, movie_genre_features):
     """
     Calculate user preferences for movie genres based on ratings
     
     Input:
-      - train_ratings: DataFrame with user-movie ratings
+      - ratings: DataFrame with user-movie ratings
       - movie_genre_features: DataFrame with movie genre features
     
     Output:
@@ -284,12 +256,12 @@ def calculate_user_genre_preferences(train_ratings, movie_genre_features):
     user_genre_preferences = []
     
     # Process each user
-    total_users = len(train_ratings['userId'].unique())
+    total_users = len(ratings['userId'].unique())
     processed_users = 0
     
-    for user_id in train_ratings['userId'].unique():
+    for user_id in ratings['userId'].unique():
         # Get user ratings
-        user_ratings = train_ratings[train_ratings['userId'] == user_id]
+        user_ratings = ratings[ratings['userId'] == user_id]
         
         if len(user_ratings) == 0:
             continue
@@ -337,7 +309,7 @@ def calculate_user_genre_preferences(train_ratings, movie_genre_features):
     return user_genre_preferences_df
 
 # Calculate user genre preferences
-user_genre_preferences = calculate_user_genre_preferences(data['train_ratings'], movie_genre_features)
+user_genre_preferences = calculate_user_genre_preferences(data['ratings'], movie_genre_features)
 
 # Analyze the user genre preferences
 print("\n" + "-"*50)
@@ -441,12 +413,12 @@ print("\n" + "="*80)
 print("STEP 4: DNN TRAINING DATA PREPARATION")
 print("="*80)
 
-def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre_features):
+def prepare_dnn_training_data(ratings, user_genre_preferences, movie_genre_features):
     """
     Prepare training data for the DNN model
     
     Input:
-      - train_ratings: DataFrame with user-movie ratings
+      - ratings: DataFrame with user-movie ratings
       - user_genre_preferences: DataFrame with user genre preferences
       - movie_genre_features: DataFrame with movie genre features
     
@@ -465,8 +437,8 @@ def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre
     labels = []
     
     # Process only a sample of ratings for efficiency
-    sample_size = min(1000000, len(train_ratings))  # Cap at 1M ratings
-    sampled_ratings = train_ratings.sample(sample_size, random_state=42) if len(train_ratings) > sample_size else train_ratings
+    sample_size = min(1000000, len(ratings))  # Cap at 1M ratings
+    sampled_ratings = ratings.sample(sample_size, random_state=42) if len(ratings) > sample_size else ratings
     
     print(f"Using {len(sampled_ratings)} ratings to train the DNN model")
     
@@ -537,7 +509,7 @@ def prepare_dnn_training_data(train_ratings, user_genre_preferences, movie_genre
 
 # Prepare DNN training data
 X_train, X_val, y_train, y_val, genre_columns = prepare_dnn_training_data(
-    data['train_ratings'], 
+    data['ratings'], 
     user_genre_preferences, 
     movie_genre_features
 )
@@ -891,7 +863,7 @@ def generate_user_movie_features(user_id, movie_id, user_genre_preferences, movi
     
     return np.array([feature_vector], dtype=np.float32)
 
-def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10):
+def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, movie_genre_features, ratings, n=10):
     """Optimized version with batched predictions"""
     print(f"Generating recommendations for user {user_id}...")
     
@@ -907,7 +879,7 @@ def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, mov
     user_prefs = user_genre_preferences[user_genre_preferences['userId'] == user_id].iloc[0]
     
     # Get movies already rated by the user
-    rated_movies = set(train_ratings[train_ratings['userId'] == user_id]['movieId'].values)
+    rated_movies = set(ratings[ratings['userId'] == user_id]['movieId'].values)
     
     # Get unrated movies
     unrated_movies = movie_genre_features[~movie_genre_features['movieId'].isin(rated_movies)]
@@ -955,7 +927,7 @@ def generate_dnn_recommendations(user_id, dnn_model, user_genre_preferences, mov
     # Return top N recommendations
     return all_predictions[:n]
 
-def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, movie_genre_features, train_ratings, n=10, batch_size=50, max_users=None):
+def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, movie_genre_features, ratings, n=10, batch_size=50, max_users=None):
     """
     Generate recommendations for all users using the DNN model with improved batching
     
@@ -963,7 +935,7 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
       - dnn_model: Trained DNN model
       - user_genre_preferences: DataFrame with user genre preferences
       - movie_genre_features: DataFrame with movie genre features
-      - train_ratings: DataFrame with training ratings
+      - ratings: DataFrame with ratings
       - n: Number of recommendations to generate per user
       - batch_size: Number of users to process in each batch
       - max_users: Maximum number of users to process (optional)
@@ -989,7 +961,7 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     # Create a lookup dictionary for user ratings to avoid repeated filtering
     print("Creating user rating lookup dictionary...")
     user_rated_movies = {}
-    for _, row in train_ratings.iterrows():
+    for _, row in ratings.iterrows():
         user_id = row['userId']
         movie_id = row['movieId']
         if user_id not in user_rated_movies:
@@ -1107,12 +1079,12 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     return all_recommendations
 
 # Generate DNN recommendations for all users (limiting to a reasonable number for demonstration)
-max_users = 200  # Adjust based on your computational resources
+max_users = 100  # Adjust based on your computational resources
 dnn_recommendations = generate_recommendations_for_all_users(
     dnn_model,
     user_genre_preferences,
     movie_genre_features,
-    data['train_ratings'],
+    data['ratings'],
     top_n,
     batch_size=50,
     max_users=max_users
@@ -1231,166 +1203,6 @@ if dnn_recommendations:
             
             print(f"{i}. {movie_info} - Predicted Rating: {rating:.2f}")
 
-print("\n" + "="*80)
-print("STEP 7: EVALUATION")
-print("="*80)
-
-def evaluate_recommendations(recommendations, test_ratings, dnn_model, user_genre_preferences, movie_genre_features):
-    """
-    Evaluate recommendations using RMSE and MAE metrics with expanded predictions
-    Modified to handle user-based train-test split
-    """
-    print("Evaluating recommendations using RMSE and MAE...")
-    
-    # Check if we have a user-based split by checking user overlap
-    train_users = set(user_genre_preferences['userId'].unique())
-    test_users = set(test_ratings['userId'].unique())
-    common_users = train_users.intersection(test_users)
-    
-    print(f"Train users: {len(train_users)}, Test users: {len(test_users)}, Common users: {len(common_users)}")
-    
-    # If no common users, use baseline evaluation with average rating
-    if len(common_users) == 0:
-        print("Using user-based split - no common users between train and test.")
-        print("Evaluating using average rating for all predictions instead.")
-        
-        # Calculate average rating from training data
-        avg_rating = 3.0  # Fallback value
-        if 'rating' in test_ratings.columns:
-            # Use the average rating from test data as baseline
-            avg_rating = test_ratings['rating'].mean()
-        
-        # Get test ratings
-        total_predictions = len(test_ratings)
-        
-        if total_predictions == 0:
-            print("No test ratings available for evaluation")
-            return {
-                'rmse': float('inf'),
-                'mae': float('inf'),
-                'num_predictions': 0
-            }
-        
-        # Calculate RMSE and MAE using average rating as prediction
-        squared_errors_sum = ((test_ratings['rating'] - avg_rating) ** 2).sum()
-        absolute_errors_sum = (abs(test_ratings['rating'] - avg_rating)).sum()
-        
-        rmse = np.sqrt(squared_errors_sum / total_predictions)
-        mae = absolute_errors_sum / total_predictions
-        
-        print(f"Baseline evaluation results (using avg rating {avg_rating:.2f}):")
-        print(f"RMSE: {rmse:.4f}")
-        print(f"MAE: {mae:.4f}")
-        print(f"Number of predictions: {total_predictions}")
-        
-        return {
-            'rmse': rmse,
-            'mae': mae,
-            'num_predictions': total_predictions,
-            'method': 'baseline_average_rating'
-        }
-    
-    # Standard evaluation (original code) for when there are common users
-    # Initialize lists for predictions and actual ratings
-    predictions = []
-    actuals = []
-    
-    # For each user in the test set
-    for user_id in test_ratings['userId'].unique():
-        # Skip users without genre preferences
-        if user_id not in user_genre_preferences['userId'].values:
-            continue
-        
-        # Get user's test ratings
-        user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
-        
-        # Get user's recommendations (movie_id, predicted_rating) if available
-        user_recs = {}
-        if user_id in recommendations:
-            user_recs = dict(recommendations[user_id])
-        
-        # Match test ratings with predictions
-        for _, row in user_test_ratings.iterrows():
-            movie_id = row['movieId']
-            actual_rating = row['rating']
-            
-            # If the movie is in recommendations
-            if movie_id in user_recs:
-                predictions.append(user_recs[movie_id])
-                actuals.append(actual_rating)
-            # Otherwise, make a new prediction for this movie
-            elif movie_id in movie_genre_features['movieId'].values:
-                # Generate feature vector for this user-movie pair
-                feature_vector = generate_user_movie_features(
-                    user_id, 
-                    movie_id, 
-                    user_genre_preferences, 
-                    movie_genre_features
-                )
-                
-                if feature_vector is not None:
-                    # Predict rating
-                    predicted_rating = dnn_model.predict(feature_vector, verbose=0)[0][0]
-                    # Ensure rating is within bounds
-                    predicted_rating = max(0.5, min(5.0, predicted_rating))
-                    
-                    predictions.append(predicted_rating)
-                    actuals.append(actual_rating)
-    
-    
-    # Check if we have predictions to evaluate
-    if not predictions:
-        print("No predictions available for evaluation using standard method")
-        # Fall back to baseline if we have test ratings
-        if len(test_ratings) > 0:
-            print("Falling back to baseline evaluation method")
-            avg_rating = test_ratings['rating'].mean() if 'rating' in test_ratings.columns else 3.0
-            total_predictions = len(test_ratings)
-            
-            # Calculate RMSE and MAE using average rating
-            squared_errors_sum = ((test_ratings['rating'] - avg_rating) ** 2).sum()
-            absolute_errors_sum = (abs(test_ratings['rating'] - avg_rating)).sum()
-            
-            rmse = np.sqrt(squared_errors_sum / total_predictions)
-            mae = absolute_errors_sum / total_predictions
-            
-            print(f"Baseline evaluation results:")
-            print(f"RMSE: {rmse:.4f}")
-            print(f"MAE: {mae:.4f}")
-            print(f"Number of predictions: {total_predictions}")
-            
-            return {
-                'rmse': rmse,
-                'mae': mae,
-                'num_predictions': total_predictions,
-                'method': 'baseline_average_rating'
-            }
-        
-        return {
-            'rmse': float('inf'),
-            'mae': float('inf'),
-            'num_predictions': 0
-        }
-    
-    # Convert to numpy arrays
-    predictions = np.array(predictions)
-    actuals = np.array(actuals)
-    
-    # Calculate RMSE and MAE
-    rmse = np.sqrt(np.mean((predictions - actuals) ** 2))
-    mae = np.mean(np.abs(predictions - actuals))
-    
-    metrics = {
-        'rmse': rmse,
-        'mae': mae,
-        'num_predictions': len(predictions),
-        'method': 'standard'
-    }
-    
-    print(f"Evaluation completed - RMSE: {rmse:.4f}, MAE: {mae:.4f}, Predictions: {len(predictions)}")
-    
-    return metrics
-
 def recommend_for_user(user_id, recommendations, movie_features=None, n=10):
     """
     Print recommendations for a specific user
@@ -1429,73 +1241,6 @@ def recommend_for_user(user_id, recommendations, movie_features=None, n=10):
                 movie_info = movie_row.iloc[0]['title']
         
         print(f"{i}. {movie_info} - Predicted Rating: {predicted_rating:.2f}")
-
-# Evaluate recommendations
-print("\nEvaluating DNN recommendations...")
-evaluation_metrics = evaluate_recommendations(
-    dnn_recommendations,
-    data['test_ratings'],
-    dnn_model,
-    user_genre_preferences,
-    movie_genre_features
-)
-
-# Save evaluation metrics
-if evaluation_metrics:
-    evaluation_results = pd.DataFrame([evaluation_metrics])
-    evaluation_results.to_csv(os.path.join(output_path, 'dnn_evaluation.csv'), index=False)
-    print(f"Saved evaluation metrics to {os.path.join(output_path, 'dnn_evaluation.csv')}")
-
-# Analyze the evaluation results
-print("\n" + "-"*50)
-print("EVALUATION ANALYSIS: MODEL PERFORMANCE")
-print("-"*50)
-
-if evaluation_metrics:
-    print("\nEvaluation Metrics:")
-    for key, value in evaluation_metrics.items():
-        if isinstance(value, (int, float)):
-            print(f"- {key}: {value:.4f}" if isinstance(value, float) else f"- {key}: {value}")
-        else:
-            print(f"- {key}: {value}")
-    
-    # Compare with baseline if possible
-    if 'method' in evaluation_metrics and evaluation_metrics['method'] == 'standard':
-        # Calculate baseline (using average rating)
-        if 'train_ratings' in data:
-            avg_rating = data['train_ratings']['rating'].mean()
-            user_avg_ratings = data['train_ratings'].groupby('userId')['rating'].mean()
-            
-            # Get actual ratings used in evaluation
-            baseline_errors = []
-            personalized_baseline_errors = []
-            
-            for user_id in test_ratings['userId'].unique():
-                if user_id not in user_genre_preferences['userId'].values:
-                    continue
-                
-                user_test_ratings = test_ratings[test_ratings['userId'] == user_id]
-                
-                for _, row in user_test_ratings.iterrows():
-                    actual_rating = row['rating']
-                    
-                    # Global average baseline
-                    baseline_errors.append((avg_rating - actual_rating)**2)
-                    
-                    # Per-user average baseline
-                    if user_id in user_avg_ratings.index:
-                        user_avg = user_avg_ratings[user_id]
-                        personalized_baseline_errors.append((user_avg - actual_rating)**2)
-            
-            if baseline_errors:
-                baseline_rmse = np.sqrt(np.mean(baseline_errors))
-                print(f"\nBaseline RMSE (global average): {baseline_rmse:.4f}")
-                print(f"Improvement over baseline: {(baseline_rmse - evaluation_metrics['rmse'])/baseline_rmse*100:.2f}%")
-            
-            if personalized_baseline_errors:
-                personalized_baseline_rmse = np.sqrt(np.mean(personalized_baseline_errors))
-                print(f"\nBaseline RMSE (user average): {personalized_baseline_rmse:.4f}")
-                print(f"Improvement over personalized baseline: {(personalized_baseline_rmse - evaluation_metrics['rmse'])/personalized_baseline_rmse*100:.2f}%")
 
 # Display a sample recommendation for user exploration
 print("\nSample recommendation for exploration:")
@@ -1540,30 +1285,6 @@ print(f"- Number of users with genre preferences: {len(user_genre_preferences)}"
 print(f"- Number of movies with genre features: {len(movie_genre_features)}")
 
 # Show performance metrics
-print("\nPerformance Metrics:")
-if evaluation_metrics:
-    print(f"- RMSE: {evaluation_metrics['rmse']:.4f}")
-    print(f"- MAE: {evaluation_metrics['mae']:.4f}")
-    print(f"- Predictions evaluated: {evaluation_metrics['num_predictions']}")
-
-# Display comparison table with other methods
-print("\nComparison with Other Methods:")
-headers = ["Model", "RMSE", "MAE", "Predictions"]
-rows = [
-    [
-        "Collaborative Filtering (DNN)",
-        f"{evaluation_metrics['rmse']:.4f}" if evaluation_metrics else "N/A",
-        f"{evaluation_metrics['mae']:.4f}" if evaluation_metrics else "N/A",
-        f"{evaluation_metrics['num_predictions']}" if evaluation_metrics else "N/A"
-    ]
-]
-
-# Print table
-col_widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers))]
-print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
-print("| " + " | ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers))) + " |")
-print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
-for row in rows:
-    print("| " + " | ".join(row[i].ljust(col_widths[i]) for i in range(len(row))) + " |")
-print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
-
+print("\nValidation Performance Metrics:")
+print(f"- RMSE: {final_val_rmse:.4f}")
+print(f"- MAE: {final_val_mae:.4f}")
