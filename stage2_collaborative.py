@@ -1088,15 +1088,22 @@ def generate_recommendations_for_all_users(dnn_model, user_genre_preferences, mo
     return all_recommendations
 
 # Generate DNN recommendations for all users (limiting to a reasonable number for demonstration)
-max_users = 100  # Adjust based on your computational resources
+all_user_ids = sorted(user_genre_preferences['userId'].unique())
+target_users_count = int(len(all_user_ids) * 0.2)
+target_users = all_user_ids[:target_users_count]
+
+print(f"Generating recommendations for first 20% of users ({len(target_users)} out of {len(all_user_ids)} total users)")
+print(f"Target user range: {min(target_users)} to {max(target_users)}")
+
+# Create filtered user_genre_preferences with only target users
+filtered_user_preferences = user_genre_preferences[user_genre_preferences['userId'].isin(target_users)]
 dnn_recommendations = generate_recommendations_for_all_users(
     dnn_model,
-    user_genre_preferences,
+    filtered_user_preferences,
     movie_genre_features,
     data['ratings'],
     top_n,
-    batch_size=50,
-    max_users=max_users
+    batch_size=50
 )
 
 # Save recommendations

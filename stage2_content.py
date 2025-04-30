@@ -45,7 +45,7 @@ if not os.path.exists(output_path):
 # lemmatizer = WordNetLemmatizer()
 
 # Model parameters/
-similarity_threshold = 0.7  # Minimum similarity to consider
+similarity_threshold = 0.8  # Minimum similarity to consider
 word2vec_dim = 200  # Dimensionality of Word2Vec embeddings
 
 print("\n" + "="*80)
@@ -949,8 +949,22 @@ def generate_recommendations_for_all_users(user_movie_similarities, train_rating
 
 # Generate recommendations if similarities are available
 if 'user_movie_similarities' in data and 'train_ratings' in data:
+    # Get all user IDs and sort them numerically
+    all_user_ids = sorted(list(user_movie_similarities.keys()))
+    
+    # Calculate the number of users to include (first 20%)
+    target_users_count = int(len(all_user_ids) * 0.2)
+    target_users = all_user_ids[:target_users_count]
+    
+    print(f"Generating recommendations for first 20% of users ({len(target_users)} out of {len(all_user_ids)} total users)")
+    print(f"Target user range: {min(target_users)} to {max(target_users)}")
+    
+    # Create a filtered version of user_movie_similarities with only the target users
+    filtered_similarities = {uid: user_movie_similarities[uid] for uid in target_users}
+    
+    # Generate recommendations only for the target users
     all_recommendations = generate_recommendations_for_all_users(
-        data['user_movie_similarities'], 
+        filtered_similarities, 
         data['train_ratings'],
         data['movie_features'],
         n=top_n,
@@ -1020,7 +1034,6 @@ if 'user_movie_similarities' in data and 'train_ratings' in data:
     # Free memory
     del recommendations_list
     gc.collect()
-
 print("\n" + "="*80)
 print("STEP 9: MODEL EVALUATION")
 print("="*80)
