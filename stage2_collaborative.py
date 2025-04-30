@@ -33,12 +33,12 @@ if not os.path.exists(output_path):
     os.makedirs(output_path)
 
 # Model parameters
-dnn_hidden_layers = [64, 32, 16]  # Optimized architecture 
+dnn_hidden_layers = [128, 64, 32]  # Optimized architecture 
 dnn_dropout_rate = 0.2
 dnn_learning_rate = 0.001
 dnn_batch_size = 64   # Increased batch size for faster training
 dnn_epochs = 20       # Reduced epochs with early stopping
-threshold_rating = 3.5  # Rating threshold to classify as "like"
+threshold_rating = 3  # Rating threshold to classify as "like"
 
 print("\n" + "="*80)
 print("STEP 1: DATA LOADING")
@@ -501,7 +501,7 @@ def prepare_dnn_training_data(ratings, user_genre_preferences, movie_genre_featu
     print(f"Created feature matrix with shape {X.shape} and labels with shape {y.shape}")
     
     # Split into training and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2)
     
     print(f"Prepared training data with {len(X_train)} samples, validation data with {len(X_val)} samples")
     

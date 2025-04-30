@@ -31,7 +31,7 @@ print("="*80)
 # Set paths
 input_path = "./"  # Current directory where stage1.py saved the files
 output_path = "./rec/content-recommendations"
-top_n =50
+top_n =20
 
 # Create output directory if it doesn't exist
 if not os.path.exists(output_path):
@@ -45,7 +45,7 @@ if not os.path.exists(output_path):
 # lemmatizer = WordNetLemmatizer()
 
 # Model parameters/
-similarity_threshold = 0.8  # Minimum similarity to consider
+similarity_threshold = 0.7  # Minimum similarity to consider
 word2vec_dim = 200  # Dimensionality of Word2Vec embeddings
 
 print("\n" + "="*80)
