@@ -1,10 +1,9 @@
 import numpy as np
 import pandas as pd
 import os
-# import torch
 import pickle
 import logging
-import argparse
+import json
 import time
 from collections import defaultdict
 import matplotlib.pyplot as plt
@@ -15,9 +14,9 @@ logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 class HybridRecommender:
-    def __init__(self, content_model_path="./content-recommendations", 
-                 collab_model_path="./recommendations", 
-                 output_path="./hybrid_recommendations", 
+    def __init__(self, content_model_path="./rec/content-recommendations", 
+                 collab_model_path="./rec/collaborative-recommendations", 
+                 output_path="./rec/hybrid_recommendations", 
                  alpha=0.3):
         """
         Initialize the hybrid recommender with paths to content-based and collaborative filtering models
@@ -38,6 +37,7 @@ class HybridRecommender:
         self.output_path = output_path
         self.alpha = alpha
         self.data = {}  # Container for all loaded data
+        self.optimal_alphas = None
         
         # Create output directory if it doesn't exist
         if not os.path.exists(output_path):
@@ -131,6 +131,16 @@ class HybridRecommender:
         except Exception as e:
             print(f"Error loading movie metadata: {str(e)}")
         
+        # Try to load previously learned optimal alphas if they exist
+        try:
+            optimal_alphas_path = os.path.join(self.output_path, 'optimal_alphas.json')
+            if os.path.exists(optimal_alphas_path):
+                with open(optimal_alphas_path, 'r') as f:
+                    self.optimal_alphas = json.load(f)
+                print(f"Loaded learned optimal alpha values for {len(self.optimal_alphas)} rating bins")
+        except Exception as e:
+            print(f"No learned alpha values found: {str(e)}")
+        
         print(f"Data loading completed in {time.time() - start_time:.2f}s")
         
         # Get common users for both recommendation systems
@@ -140,10 +150,10 @@ class HybridRecommender:
             print(f"Found {len(self.common_users)} users with both content-based and collaborative recommendations")
         
         return self.data
-    
+
     def get_adaptive_alpha(self, user_id):
         """
-        Get optimized alpha value based on user's rating count
+        Get optimized alpha value based on user's rating count and learned optimal values
         
         Parameters:
         -----------
@@ -162,17 +172,38 @@ class HybridRecommender:
             if not user_data.empty:
                 rating_count = user_data.iloc[0]['rating_count']
         
-        # Map rating count to appropriate alpha based on performance analysis
-        if rating_count <= 25:
-            return 0.2
+        # Check if we have learned optimal alpha values
+        if self.optimal_alphas:
+            # Find appropriate bin for this user
+            for bin_name, alpha in self.optimal_alphas.items():
+                if '-' in bin_name:
+                    # Range bin (e.g., "10-24")
+                    lower, upper = map(int, bin_name.split('-'))
+                    if lower <= rating_count <= upper:
+                        return alpha
+                elif '+' in bin_name:
+                    # Last bin (e.g., "300+")
+                    threshold = int(bin_name.replace('+', ''))
+                    if rating_count >= threshold:
+                        return alpha
+        
+        # Fallback to default values if no learned values are available
+        if rating_count <= 10:
+            return 0.01
+        elif rating_count <= 25:
+            return 0.05
         elif rating_count <= 50:
-            return 0.3
+            return 0.15
+        elif rating_count <= 100:
+            return 0.25
         elif rating_count <= 150:
-            return 0.5
+            return 0.35
         elif rating_count <= 200:
-            return 0.5
-        else:  # > 200
-            return 0.772222
+            return 0.45
+        elif rating_count <= 300:
+            return 0.55
+        else:  # > 300
+            return 0.65
     
     def normalize_prediction(self, prediction):
         """
@@ -208,6 +239,219 @@ class HybridRecommender:
         # Convert from [0, 1] back to rating scale [0.5, 5.0]
         return 0.5 + 4.5 * normalized_prediction
     
+    def _prepare_validation_data(self):
+        """
+        Prepare validation data for alpha optimization
+        
+        Returns:
+        --------
+        dict
+            Validation data for evaluating different alpha values
+        """
+        # We need content and collaborative predictions for the same user-item pairs
+        validation_data = {}
+        
+        # Get common users with both types of recommendations
+        common_users = self.common_users
+        if not common_users:
+            print("Error: No common users found with both types of recommendations")
+            return None
+        
+        # Sample users for validation
+        sample_size = min(1000, len(common_users))
+        validation_users = np.random.choice(list(common_users), sample_size, replace=False)
+        
+        # For each user, find items with both content and collaborative predictions
+        for user_id in validation_users:
+            user_validation = {}
+            
+            # Get content recommendations
+            content_recs = {movie_id: score for movie_id, score 
+                           in self.data['content_recommendations'].get(user_id, [])}
+            
+            # Get collaborative recommendations
+            collab_recs = {movie_id: rating for movie_id, rating 
+                          in self.data['collaborative_recommendations'].get(user_id, [])}
+            
+            # Find common movies
+            common_movies = set(content_recs.keys()) & set(collab_recs.keys())
+            
+            if not common_movies:
+                continue
+            
+            # Add to validation data
+            for movie_id in common_movies:
+                user_validation[movie_id] = {
+                    'content_score': content_recs[movie_id],
+                    'collab_score': self.normalize_prediction(collab_recs[movie_id])
+                }
+            
+            if user_validation:
+                validation_data[user_id] = user_validation
+        
+        print(f"Prepared validation data for {len(validation_data)} users")
+        return validation_data
+
+    def _evaluate_alpha_for_users(self, alpha, user_ids, validation_data):
+        """
+        Evaluate RMSE for a specific alpha value on a set of users
+        
+        Parameters:
+        -----------
+        alpha: float
+            Alpha value to evaluate
+        user_ids: list
+            List of user IDs to evaluate
+        validation_data: dict
+            Validation data
+            
+        Returns:
+        --------
+        float
+            RMSE for the given alpha value
+        """
+        squared_errors = []
+        
+        for user_id in user_ids:
+            if user_id not in validation_data:
+                continue
+            
+            user_validation = validation_data[user_id]
+            
+            for movie_id, data in user_validation.items():
+                # Combine predictions using alpha
+                combined_score = alpha * data['content_score'] + (1 - alpha) * data['collab_score']
+                
+                # Convert to rating scale
+                final_rating = self.denormalize_prediction(combined_score)
+                
+                # Compare with ground truth (use collaborative rating as ground truth)
+                true_rating = self.denormalize_prediction(data['collab_score'])
+                
+                # Calculate squared error
+                squared_error = (final_rating - true_rating) ** 2
+                squared_errors.append(squared_error)
+        
+        if not squared_errors:
+            return float('inf')
+        
+        # Calculate RMSE
+        rmse = np.sqrt(np.mean(squared_errors))
+        return rmse
+    
+    def learn_optimal_alpha_values(self, rating_bins=[0, 10, 25, 50, 100, 150, 200, 300], 
+                                 alpha_values=None):
+        """
+        Learn optimal alpha values for different rating count bins using grid search
+        
+        Parameters:
+        -----------
+        rating_bins: list
+            Rating count thresholds for binning users
+        alpha_values: array
+            Possible alpha values to explore
+            
+        Returns:
+        --------
+        dict
+            Mapping of rating bins to optimal alpha values
+        """
+        if alpha_values is None:
+            alpha_values = np.arange(0.0, 1.05, 0.05)
+            
+        print(f"\nLearning optimal alpha values with grid search for {len(rating_bins)} bins...")
+        
+        # Get user rating counts and test data
+        if 'user_rating_counts' not in self.data:
+            print("Error: User rating counts not available")
+            return None
+        
+        # Create user bins based on rating counts
+        user_bins = {}
+        for i in range(len(rating_bins)):
+            if i == len(rating_bins) - 1:
+                bin_name = f"{rating_bins[i]}+"
+            else:
+                bin_name = f"{rating_bins[i]}-{rating_bins[i+1]-1}"
+            user_bins[bin_name] = []
+        
+        # Assign users to bins
+        for _, row in self.data['user_rating_counts'].iterrows():
+            user_id = row['userId']
+            rating_count = row['rating_count']
+            
+            # Find appropriate bin
+            for i in range(len(rating_bins)):
+                if i == len(rating_bins) - 1:
+                    if rating_count >= rating_bins[i]:
+                        bin_name = f"{rating_bins[i]}+"
+                        user_bins[bin_name].append(user_id)
+                        break
+                else:
+                    if rating_bins[i] <= rating_count < rating_bins[i+1]:
+                        bin_name = f"{rating_bins[i]}-{rating_bins[i+1]-1}"
+                        user_bins[bin_name].append(user_id)
+                        break
+        
+        # Print user distribution in bins
+        print("\nUser distribution in rating bins:")
+        for bin_name, users in user_bins.items():
+            print(f"  {bin_name} ratings: {len(users)} users")
+        
+        # Prepare validation data
+        validation_data = self._prepare_validation_data()
+        if validation_data is None:
+            print("Error: Could not prepare validation data")
+            return None
+        
+        # For each bin, find optimal alpha value
+        optimal_alphas = {}
+        
+        for bin_name, user_ids in user_bins.items():
+            print(f"\nFinding optimal alpha for bin {bin_name}...")
+            
+            if not user_ids:
+                print(f"  No users in bin {bin_name}, skipping")
+                continue
+            
+            # Filter users to those with validation data
+            valid_users = [uid for uid in user_ids if uid in validation_data]
+            
+            if not valid_users:
+                print(f"  No users with validation data in bin {bin_name}, skipping")
+                continue
+            
+            # Select a sample of users for faster evaluation if bin is large
+            sample_size = min(500, len(valid_users))
+            sample_users = np.random.choice(valid_users, sample_size, replace=False)
+            
+            best_rmse = float('inf')
+            best_alpha = 0.0
+            
+            for alpha in alpha_values:
+                # Evaluate RMSE for this alpha value
+                rmse = self._evaluate_alpha_for_users(alpha, sample_users, validation_data)
+                
+                print(f"  Alpha {alpha:.2f}: RMSE {rmse:.4f}")
+                
+                if rmse < best_rmse:
+                    best_rmse = rmse
+                    best_alpha = alpha
+            
+            optimal_alphas[bin_name] = best_alpha
+            print(f"  Optimal alpha for bin {bin_name}: {best_alpha:.2f} (RMSE: {best_rmse:.4f})")
+        
+        # Save optimal alpha values
+        self.optimal_alphas = optimal_alphas
+        
+        # Save to file
+        with open(os.path.join(self.output_path, 'optimal_alphas.json'), 'w') as f:
+            json.dump(optimal_alphas, f, indent=2)
+        
+        print(f"\nOptimal alpha values saved to {os.path.join(self.output_path, 'optimal_alphas.json')}")
+        
+        return optimal_alphas
+    
     def combine_recommendations(self, top_n=10, use_adaptive_alpha=True):
         """
         Combine content-based and collaborative filtering recommendations with optimized weighting
@@ -224,7 +468,7 @@ class HybridRecommender:
         dict
             User ID to list of (movie_id, score) tuples
         """
-        print(f"\nCombining recommendations with optimized adaptive alpha values...")
+        print(f"\nCombining recommendations with {'adaptive' if use_adaptive_alpha else 'fixed'} alpha values...")
         start_time = time.time()
         
         # Get recommendations from both models
@@ -264,7 +508,7 @@ class HybridRecommender:
                         rating_count = user_data.iloc[0]['rating_count']
                 
                 # Categorize for statistics
-                count_category = "<=25" if rating_count <= 25 else "26-50" if rating_count <= 50 else "51-150" if rating_count <= 150 else "151-200" if rating_count <= 200 else ">200"
+                count_category = "<=10" if rating_count <= 10 else "11-25" if rating_count <= 25 else "26-50" if rating_count <= 50 else "51-100" if rating_count <= 100 else "101-150" if rating_count <= 150 else "151-200" if rating_count <= 200 else "201-300" if rating_count <= 300 else ">300"
                 if count_category in alpha_stats['count_categories']:
                     alpha_stats['count_categories'][count_category]['count'] += 1
                     alpha_stats['count_categories'][count_category]['alpha_sum'] += alpha
@@ -337,9 +581,19 @@ class HybridRecommender:
             print(f"Average alpha: {np.mean(alpha_stats['values']):.4f}")
             print(f"Min alpha: {min(alpha_stats['values']):.4f}, Max alpha: {max(alpha_stats['values']):.4f}")
             print("\nAlpha by user rating count:")
-            for category, stats in sorted(alpha_stats['count_categories'].items(), 
-                                         key=lambda x: (int(x[0].replace('<=', '').replace('>', '').split('-')[0]) 
-                                                       if x[0] not in ['>200'] else float('inf'))):
+            
+            # Sort categories by rating count
+            def sort_key(category):
+                if category.startswith("<="):
+                    return (0, int(category[2:]))
+                elif category.startswith(">"):
+                    return (999, int(category[1:]))
+                else:
+                    # Format like "11-25"
+                    lower = int(category.split("-")[0])
+                    return (lower, lower)
+                
+            for category, stats in sorted(alpha_stats['count_categories'].items(), key=lambda x: sort_key(x[0])):
                 avg_alpha = stats['alpha_sum'] / stats['count']
                 print(f"  {category} ratings: {stats['count']} users, avg alpha = {avg_alpha:.4f}")
             
@@ -349,11 +603,19 @@ class HybridRecommender:
                 f.write(f"Average alpha: {np.mean(alpha_stats['values']):.4f}\n")
                 f.write(f"Min alpha: {min(alpha_stats['values']):.4f}, Max alpha: {max(alpha_stats['values']):.4f}\n\n")
                 f.write("Alpha by user rating count:\n")
-                for category, stats in sorted(alpha_stats['count_categories'].items(), 
-                                            key=lambda x: (int(x[0].replace('<=', '').replace('>', '').split('-')[0]) 
-                                                          if x[0] not in ['>200'] else float('inf'))):
+                for category, stats in sorted(alpha_stats['count_categories'].items(), key=lambda x: sort_key(x[0])):
                     avg_alpha = stats['alpha_sum'] / stats['count']
                     f.write(f"  {category} ratings: {stats['count']} users, avg alpha = {avg_alpha:.4f}\n")
+            
+            # Create a visualization of alpha distribution
+            plt.figure(figsize=(12, 6))
+            plt.hist(alpha_stats['values'], bins=20, alpha=0.7)
+            plt.title('Distribution of Alpha Values')
+            plt.xlabel('Alpha Value')
+            plt.ylabel('Number of Users')
+            plt.grid(True, alpha=0.3)
+            plt.savefig(os.path.join(self.output_path, 'alpha_distribution.png'))
+            plt.close()
         
         print(f"Combined recommendations for {len(combined_recommendations)} users in {time.time() - start_time:.2f}s")
         
@@ -426,44 +688,73 @@ class HybridRecommender:
         
         # Calculate combined metrics based on alpha distribution
         if use_adaptive_alpha and 'user_rating_counts' in self.data:
-            # Get rating count distribution
-            rating_counts = self.data['user_rating_counts']['rating_count'].values
+            # Get user distribution in different rating count bins
+            rating_counts = {}
+            for _, row in self.data['user_rating_counts'].iterrows():
+                rating_count = row['rating_count']
+                if rating_count <= 10:
+                    bin_name = "<=10"
+                elif rating_count <= 25:
+                    bin_name = "11-25"
+                elif rating_count <= 50:
+                    bin_name = "26-50"
+                elif rating_count <= 100:
+                    bin_name = "51-100"
+                elif rating_count <= 150:
+                    bin_name = "101-150"
+                elif rating_count <= 200:
+                    bin_name = "151-200"
+                elif rating_count <= 300:
+                    bin_name = "201-300"
+                else:  # > 300
+                    bin_name = ">300"
+                
+                if bin_name in rating_counts:
+                    rating_counts[bin_name] += 1
+                else:
+                    rating_counts[bin_name] = 1
             
-            # Count users in each category
-            users_by_category = {
-                '<=25': sum(1 for count in rating_counts if count <= 25),
-                '26-50': sum(1 for count in rating_counts if 25 < count <= 50),
-                '51-150': sum(1 for count in rating_counts if 50 < count <= 150),
-                '151-200': sum(1 for count in rating_counts if 150 < count <= 200),
-                '>200': sum(1 for count in rating_counts if count > 200)
-            }
-            
-            total_users = len(rating_counts)
+            total_users = sum(rating_counts.values())
             
             # Calculate weighted RMSE and MAE
             weighted_rmse = 0
             weighted_mae = 0
             
-            for category, count in users_by_category.items():
-                weight = count / total_users
+            # Function to get alpha for a bin
+            def get_bin_alpha(bin_name):
+                if self.optimal_alphas and bin_name in self.optimal_alphas:
+                    return self.optimal_alphas[bin_name]
                 
-                if category == '<=25':
-                    alpha = 0.2
-                elif category == '26-50':
-                    alpha = 0.3
-                elif category == '51-150':
-                    alpha = 0.5
-                elif category == '151-200':
-                    alpha = 0.5
-                else:  # >200
-                    alpha = 0.772222
+                # Fallback to default values
+                if bin_name == "<=10":
+                    return 0.01
+                elif bin_name == "11-25":
+                    return 0.05
+                elif bin_name == "26-50":
+                    return 0.15
+                elif bin_name == "51-100":
+                    return 0.25
+                elif bin_name == "101-150":
+                    return 0.35
+                elif bin_name == "151-200":
+                    return 0.45
+                elif bin_name == "201-300":
+                    return 0.55
+                else:  # ">300"
+                    return 0.65
+            
+            for bin_name, count in rating_counts.items():
+                weight = count / total_users
+                alpha = get_bin_alpha(bin_name)
                 
                 # Calculate weighted metrics
-                category_rmse = alpha * content_rmse + (1 - alpha) * dnn_rmse
-                category_mae = alpha * content_mae + (1 - alpha) * dnn_mae
+                bin_rmse = alpha * content_rmse + (1 - alpha) * dnn_rmse
+                bin_mae = alpha * content_mae + (1 - alpha) * dnn_mae
                 
-                weighted_rmse += weight * category_rmse
-                weighted_mae += weight * category_mae
+                weighted_rmse += weight * bin_rmse
+                weighted_mae += weight * bin_mae
+                
+                print(f"  Bin {bin_name}: {count} users, alpha = {alpha:.4f}, RMSE = {bin_rmse:.4f}")
             
             # Store hybrid evaluation metrics
             hybrid_metrics = {
@@ -492,6 +783,108 @@ class HybridRecommender:
         pd.DataFrame([hybrid_metrics]).to_csv(os.path.join(self.output_path, 'evaluation_metrics.csv'), index=False)
         
         return hybrid_metrics
+    
+    def update_alpha_values(self, new_ratings, learning_rate=0.01):
+        """
+        Update alpha values based on new user ratings
+        
+        Parameters:
+        -----------
+        new_ratings: DataFrame
+            New ratings data with userId, movieId, rating columns
+        learning_rate: float
+            Learning rate for updates
+            
+        Returns:
+        --------
+        dict
+            Updated alpha values
+        """
+        print("Updating alpha values with new ratings data...")
+        
+        if not self.optimal_alphas:
+            print("No optimal alpha values to update")
+            return None
+        
+        # Group new ratings by user
+        user_ratings = new_ratings.groupby('userId')
+        
+        for user_id, ratings in user_ratings:
+            # Get current alpha for this user
+            current_alpha = self.get_adaptive_alpha(user_id)
+            
+            # Calculate error for content-based and collaborative predictions
+            content_errors = []
+            collab_errors = []
+            
+            for _, row in ratings.iterrows():
+                movie_id = row['movieId']
+                true_rating = row['rating']
+                
+                # Get content-based prediction if available
+                content_pred = None
+                if user_id in self.data.get('content_recommendations', {}) and movie_id in [m for m, _ in self.data['content_recommendations'][user_id]]:
+                    for m, s in self.data['content_recommendations'][user_id]:
+                        if m == movie_id:
+                            content_pred = self.denormalize_prediction(s)
+                            break
+                
+                # Get collaborative prediction if available
+                collab_pred = None
+                if user_id in self.data.get('collaborative_recommendations', {}) and movie_id in [m for m, _ in self.data['collaborative_recommendations'][user_id]]:
+                    for m, r in self.data['collaborative_recommendations'][user_id]:
+                        if m == movie_id:
+                            collab_pred = r
+                            break
+                
+                # Calculate errors if both predictions are available
+                if content_pred is not None and collab_pred is not None:
+                    content_error = (content_pred - true_rating) ** 2
+                    collab_error = (collab_pred - true_rating) ** 2
+                    
+                    content_errors.append(content_error)
+                    collab_errors.append(collab_error)
+            
+            # Update alpha if we have errors
+            if content_errors and collab_errors:
+                avg_content_error = np.mean(content_errors)
+                avg_collab_error = np.mean(collab_errors)
+                
+                # Adjust alpha based on relative performance
+                # If content error is higher, decrease alpha; if collab error is higher, increase alpha
+                error_diff = avg_content_error - avg_collab_error
+                delta_alpha = learning_rate * error_diff
+                
+                new_alpha = current_alpha - delta_alpha
+                new_alpha = max(0.0, min(1.0, new_alpha))  # Clip to [0, 1]
+                
+                # Find appropriate bin for this user
+                rating_count = 0
+                if 'user_rating_counts' in self.data:
+                    user_data = self.data['user_rating_counts'][self.data['user_rating_counts']['userId'] == user_id]
+                    if not user_data.empty:
+                        rating_count = user_data.iloc[0]['rating_count']
+                
+                for bin_name in self.optimal_alphas.keys():
+                    if '-' in bin_name:
+                        lower, upper = map(int, bin_name.split('-'))
+                        if lower <= rating_count <= upper:
+                            # Weighted update of bin alpha
+                            self.optimal_alphas[bin_name] = 0.9 * self.optimal_alphas[bin_name] + 0.1 * new_alpha
+                            break
+                    elif '+' in bin_name:
+                        threshold = int(bin_name.replace('+', ''))
+                        if rating_count >= threshold:
+                            self.optimal_alphas[bin_name] = 0.9 * self.optimal_alphas[bin_name] + 0.1 * new_alpha
+                            break
+        
+        # Save updated alpha values
+        with open(os.path.join(self.output_path, 'optimal_alphas.json'), 'w') as f:
+            json.dump(self.optimal_alphas, f, indent=2)
+        
+        print(f"Updated alpha values saved to {os.path.join(self.output_path, 'optimal_alphas.json')}")
+        
+        return self.optimal_alphas
     
     def recommend_for_user(self, user_id, n=10, use_adaptive_alpha=True):
         """
@@ -581,24 +974,20 @@ class HybridRecommender:
             formatted_recs.append((movie_id, title, score))
         
         return formatted_recs
+
 def main():
-    # Configuration section - replace argparse functionality
-    # Set these values as needed
+    # Configuration section
     content_path = "./rec/content-recommendations"
     collab_path = "./rec/collaborative-recommendations"
     output_path = "./rec/hybrid_recommendations"
     alpha = 0.3
-    optimize_alpha = False
+    learn_alpha = True  # Enable alpha learning
     adaptive_alpha = True
-    batch_mode = True  # Set to True to avoid interactive prompts in notebook
     num_recs = 10
-    generate = True  # Generate recommendations if they don't exist
-
-    # Keep the rest of the imports and class definitions exactly as they are in the original file
-    # ...
-
-    # Replace the main() function call at the bottom of the script with this code:
-
+    
+    # Custom rating bins for learning
+    rating_bins = [0, 10, 25, 50, 100, 150, 200, 300]
+    
     # Create and initialize the hybrid recommender
     recommender = HybridRecommender(
         content_model_path=content_path,
@@ -610,23 +999,14 @@ def main():
     # Load data
     recommender.load_data()
 
-    # Generate recommendations if requested and they don't exist
-    if generate:
-        if 'content_recommendations' not in recommender.data or not recommender.data['content_recommendations']:
-            recommender.generate_content_based_recommendations()
-        
-        if 'collaborative_recommendations' not in recommender.data or not recommender.data['collaborative_recommendations']:
-            recommender.generate_collaborative_recommendations()
+    # Learn optimal alpha values if requested
+    if learn_alpha:
+        recommender.learn_optimal_alpha_values(rating_bins=rating_bins)
 
-    # Find optimal alpha if requested
-    if optimize_alpha:
-        optimal_alpha = recommender.find_optimal_alpha()
-        print(f"Optimal alpha: {optimal_alpha:.2f}")
-
-    # Combine recommendations
+    # Combine recommendations with learned alphas
     recommender.combine_recommendations(top_n=num_recs, use_adaptive_alpha=adaptive_alpha)
 
-    # Evaluate
+    # Evaluate 
     evaluation_metrics = recommender.evaluate(use_adaptive_alpha=adaptive_alpha)
 
     # Compare with individual models
@@ -654,7 +1034,7 @@ def main():
 
     # Hybrid model metrics
     if evaluation_metrics:
-        alpha_desc = "Adaptive" if adaptive_alpha else f"α={recommender.alpha:.2f}"
+        alpha_desc = "Adaptive (Learned)" if adaptive_alpha else f"α={recommender.alpha:.2f}"
         rows.append([
             f"Hybrid ({alpha_desc})",
             f"{evaluation_metrics['rmse']:.4f}",
@@ -678,8 +1058,37 @@ def main():
         
         print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
 
-    print("\nHybrid Recommendation System completed successfully!")
-
+    # Show sample recommendations
+    if 'combined_recommendations' in recommender.data:
+        # Get a sample user ID
+        sample_user_id = next(iter(recommender.data['combined_recommendations'].keys()))
+        
+        print(f"\nSample recommendations for user {sample_user_id}:")
+        recs = recommender.recommend_for_user(sample_user_id, n=5)
+        
+        for i, (movie_id, title, score) in enumerate(recs, 1):
+            print(f"{i}. {title} (ID: {movie_id}) - Score: {score:.2f}")
+    
+    # Create visualizations of results
+    if 'combined_recommendations' in recommender.data:
+        # Create visualization of recommendation scores
+        scores = []
+        for user_id, recs in recommender.data['combined_recommendations'].items():
+            for _, score in recs:
+                scores.append(score)
+        
+        plt.figure(figsize=(10, 6))
+        plt.hist(scores, bins=20, alpha=0.7)
+        plt.title('Distribution of Recommendation Scores')
+        plt.xlabel('Score')
+        plt.ylabel('Count')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(output_path, 'recommendation_scores.png'))
+        plt.close()
+        
+        print(f"Visualization saved to {os.path.join(output_path, 'recommendation_scores.png')}")
+    
+    print("\nHybrid Recommendation System with Learning completed successfully!")
 
 if __name__ == "__main__":
     main()
