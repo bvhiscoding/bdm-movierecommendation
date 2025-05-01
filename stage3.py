@@ -582,46 +582,58 @@ class HybridRecommender:
         
         return formatted_recs
 def main():
-    parser = argparse.ArgumentParser(description='Optimized Hybrid Movie Recommendation System')
-    parser.add_argument('--content_path', type=str, default='./rec/content-recommendations', 
-                      help='Path to content-based model files')
-    parser.add_argument('--collab_path', type=str, default='./rec/collaborative-recommendations',
-                      help='Path to collaborative filtering model files')
-    parser.add_argument('--output_path', type=str, default='./rec/hybrid_recommendations',
-                      help='Path to save hybrid recommendation results')
-    parser.add_argument('--alpha', type=float, default=0.3,
-                      help='Weight for content-based recommendations (1-alpha for collaborative)')
-    parser.add_argument('--num_recs', type=int, default=10,
-                      help='Number of recommendations to generate')
-    parser.add_argument('--use_adaptive_alpha', action='store_true', default=True,
-                      help='Use optimized adaptive alpha based on user rating count')
-    parser.add_argument('--batch_mode', action='store_true',
-                      help='Run in batch mode (no interactive prompts)')
-    
-    args = parser.parse_args()
-    
+    # Configuration section - replace argparse functionality
+    # Set these values as needed
+    content_path = "./rec/content-recommendations"
+    collab_path = "./rec/collaborative-recommendations"
+    output_path = "./rec/hybrid_recommendations"
+    alpha = 0.3
+    optimize_alpha = False
+    adaptive_alpha = True
+    batch_mode = True  # Set to True to avoid interactive prompts in notebook
+    num_recs = 10
+    generate = True  # Generate recommendations if they don't exist
+
+    # Keep the rest of the imports and class definitions exactly as they are in the original file
+    # ...
+
+    # Replace the main() function call at the bottom of the script with this code:
+
     # Create and initialize the hybrid recommender
     recommender = HybridRecommender(
-        content_model_path=args.content_path,
-        collab_model_path=args.collab_path,
-        output_path=args.output_path,
-        alpha=args.alpha
+        content_model_path=content_path,
+        collab_model_path=collab_path,
+        output_path=output_path,
+        alpha=alpha
     )
-    
-    # Load only the essential data
+
+    # Load data
     recommender.load_data()
-    
-    # Combine recommendations with optimized alpha values
-    recommender.combine_recommendations(top_n=args.num_recs, use_adaptive_alpha=args.use_adaptive_alpha)
-    
-    # Evaluate using pre-computed metrics
-    evaluation_metrics = recommender.evaluate(use_adaptive_alpha=args.use_adaptive_alpha)
-    
-    # Compare performance with individual models
+
+    # Generate recommendations if requested and they don't exist
+    if generate:
+        if 'content_recommendations' not in recommender.data or not recommender.data['content_recommendations']:
+            recommender.generate_content_based_recommendations()
+        
+        if 'collaborative_recommendations' not in recommender.data or not recommender.data['collaborative_recommendations']:
+            recommender.generate_collaborative_recommendations()
+
+    # Find optimal alpha if requested
+    if optimize_alpha:
+        optimal_alpha = recommender.find_optimal_alpha()
+        print(f"Optimal alpha: {optimal_alpha:.2f}")
+
+    # Combine recommendations
+    recommender.combine_recommendations(top_n=num_recs, use_adaptive_alpha=adaptive_alpha)
+
+    # Evaluate
+    evaluation_metrics = recommender.evaluate(use_adaptive_alpha=adaptive_alpha)
+
+    # Compare with individual models
     print("\nModel Performance Comparison:")
     headers = ["Model", "RMSE", "MAE", "Predictions"]
     rows = []
-    
+
     # Content-based model metrics
     if 'content_evaluation' in recommender.data:
         rows.append([
@@ -630,7 +642,7 @@ def main():
             f"{recommender.data['content_evaluation'].get('mae', 'N/A')}",
             f"{recommender.data['content_evaluation'].get('num_predictions', 'N/A')}"
         ])
-    
+
     # Collaborative filtering model metrics
     if 'dnn_evaluation' in recommender.data:
         rows.append([
@@ -639,17 +651,17 @@ def main():
             f"{recommender.data['dnn_evaluation']['mae']:.4f}",
             f"{recommender.data['dnn_evaluation']['num_predictions']}"
         ])
-    
+
     # Hybrid model metrics
     if evaluation_metrics:
-        alpha_desc = "Adaptive" if args.use_adaptive_alpha else f"α={recommender.alpha:.2f}"
+        alpha_desc = "Adaptive" if adaptive_alpha else f"α={recommender.alpha:.2f}"
         rows.append([
             f"Hybrid ({alpha_desc})",
             f"{evaluation_metrics['rmse']:.4f}",
             f"{evaluation_metrics['mae']:.4f}",
             f"{evaluation_metrics['num_predictions']}"
         ])
-    
+
     # Print table
     if rows:
         # Calculate column widths
@@ -665,77 +677,9 @@ def main():
             print("| " + " | ".join(row[i].ljust(col_widths[i]) for i in range(len(row))) + " |")
         
         print("+" + "+".join("-" * (width + 2) for width in col_widths) + "+")
-    
-    if args.batch_mode:
-        print("\nOptimized Hybrid Recommendation System completed successfully!")
-        return
-    
-    # Interactive mode - prompt for user IDs
-    while True:
-        try:
-            user_input = input("\nEnter user id to recommend (blank to stop): ")
-            
-            if not user_input.strip():
-                print("\nExiting recommendation system. Goodbye!")
-                break
-            
-            try:
-                user_id = int(user_input)
-            except ValueError:
-                print("Please enter a valid numeric user ID.")
-                continue
-            
-            print(f"\nGenerating recommendations for User ID: {user_id}")
-            
-            # Get adaptive alpha for this user
-            if args.use_adaptive_alpha:
-                alpha = recommender.get_adaptive_alpha(user_id)
-                
-                # Get rating count
-                rating_count = 0
-                if 'user_rating_counts' in recommender.data:
-                    user_data = recommender.data['user_rating_counts'][recommender.data['user_rating_counts']['userId'] == user_id]
-                    if not user_data.empty:
-                        rating_count = user_data.iloc[0]['rating_count']
-                
-                print(f"\nUser Profile:")
-                print(f"- Rating count: {rating_count}")
-                
-                # Determine user category based on rating count
-                if rating_count <= 25:
-                    user_category = "New user"
-                elif rating_count <= 50:
-                    user_category = "Casual user"
-                elif rating_count <= 150:
-                    user_category = "Regular user"
-                elif rating_count <= 200:
-                    user_category = "Active user"
-                else:
-                    user_category = "Power user"
-                        
-                print(f"- User category: {user_category}")
-                print(f"- Adaptive alpha: {alpha:.2f}" + 
-                      f" (more weight on {'content-based' if alpha > 0.5 else 'collaborative filtering'})")
-            
-            # Get recommendations
-            recommendations = recommender.recommend_for_user(user_id, n=args.num_recs, use_adaptive_alpha=args.use_adaptive_alpha)
-            
-            if recommendations:
-                print(f"\nTop {len(recommendations)} recommendations for User {user_id}:")
-                for i, (movie_id, title, score) in enumerate(recommendations, 1):
-                    print(f"{i}. '{title}' - Predicted Rating: {score:.2f}")
-            else:
-                print(f"\nNo recommendations found for User {user_id}")
-        
-        except KeyboardInterrupt:
-            print("\nProcess interrupted by user. Exiting...")
-            break
-        except Exception as e:
-            print(f"\nAn error occurred: {str(e)}")
-            import traceback
-            traceback.print_exc()
-    
-    print("\nOptimized Hybrid Recommendation System completed successfully!")
+
+    print("\nHybrid Recommendation System completed successfully!")
+
 
 if __name__ == "__main__":
     main()
